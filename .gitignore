@@ -1,0 +1,13 @@
+# Reference screenshots of another app; not for publishing
+IMG_*.PNG
+
+# Build output and generated themes
+dist/
+/bearty
+*.theme
+!internal/library/testdata/*.theme
+
+.DS_Store
+
+# Local dogfood installer
+dev-install.sh
