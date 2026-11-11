@@ -14,6 +14,7 @@ import (
 
 	"github.com/manojsachwani/bearty/internal/fonts"
 	"github.com/manojsachwani/bearty/internal/library"
+	"github.com/manojsachwani/bearty/internal/theme"
 )
 
 // ErrAborted is returned when the user quits before finishing the form.
@@ -26,34 +27,55 @@ const (
 	stageEdit
 )
 
-var steps = []string{"Start", "Paper", "Ink", "Type", "Layout", "Colors", "Save", "Install"}
+var steps = []string{"Start", "Paper", "Ink", "Type", "Layout", "Colors", "Details", "Dark", "Save", "Install"}
 
-// stepOf maps a focused field's key to its breadcrumb step.
+// stepOf maps a focused field's key to its breadcrumb step. Keys starting
+// with one of stepPrefix's prefixes are looked up there.
 var stepOf = map[string]string{
-	"mode": "Start", "saved": "Start",
+	"mode": "Start", "saved": "Start", "reapply-restart": "Start", "capture": "Start",
+	"use": "Start", "use-restart": "Start",
+	"capture-name": "Start", "import": "Start", "import-name": "Start",
 	"name": "Paper", "paper": "Paper", "paperhex": "Paper",
-	"ink": "Ink", "inkhex": "Ink", "accentmode": "Ink", "acc-links": "Ink", "acc-markers": "Ink",
-	"acc-ticks": "Ink", "headings": "Ink", "headinghex": "Ink",
-	"fontsrc": "Type", "pick": "Type", "fontquery": "Type", "family": "Type", "headingfont": "Type", "face": "Type", "google": "Type",
-	"size": "Layout", "lines": "Layout", "lineheight": "Layout", "pspacing": "Layout",
-	"pindent": "Layout", "linewidth": "Layout",
-	"regions": "Colors", "side-bg": "Colors", "side-text": "Colors", "side-icons": "Colors",
-	"side-sel": "Colors", "list-title": "Colors", "list-preview": "Colors", "list-date": "Colors",
-	"list-sel": "Colors",
-	"output":   "Output", "path": "Save",
-	"slot": "Install", "confirm": "Install", "typography": "Install",
+	"ink": "Ink", "inkhex": "Ink", "accentmode": "Ink", "headings": "Ink", "headinghex": "Ink",
+	"fontsrc": "Type", "pick": "Type", "pickweight": "Type", "fontquery": "Type", "family": "Type",
+	"face": "Type", "google": "Type", "googleweight": "Type", "headingfont": "Type",
+	"headingweight": "Type", "codefont": "Type",
+	"size": "Layout", "headingscale": "Layout", "lines": "Layout", "lineheight": "Layout",
+	"pspacing": "Layout", "pindent": "Layout", "linewidth": "Layout",
+	"regions": "Colors", "details": "Details",
+	"dark": "Dark", "darkpaper": "Dark", "darkink": "Dark",
+	"output": "Save", "path": "Save",
+	"slot": "Install", "darkslot": "Install", "confirm": "Install", "typography": "Install",
+	"restart": "Install",
+}
+
+var stepPrefix = map[string]string{
+	"acc-": "Ink", "side-": "Colors", "list-": "Colors", "hl-": "Details", "code-": "Details", "tag-": "Details",
+}
+
+func stepFor(key string) (string, bool) {
+	if s, ok := stepOf[key]; ok {
+		return s, true
+	}
+	for prefix, s := range stepPrefix {
+		if strings.HasPrefix(key, prefix) {
+			return s, true
+		}
+	}
+	return "", false
 }
 
 // keys are bearty's own shortcuts; each field adds its own help below the form.
 type keys struct {
-	About, Back, Quit key.Binding
+	About, Dark, Back, Quit key.Binding
 }
 
-func (k keys) ShortHelp() []key.Binding  { return []key.Binding{k.About, k.Back, k.Quit} }
+func (k keys) ShortHelp() []key.Binding  { return []key.Binding{k.About, k.Dark, k.Back, k.Quit} }
 func (k keys) FullHelp() [][]key.Binding { return [][]key.Binding{k.ShortHelp()} }
 
 var globalKeys = keys{
 	About: key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "about")),
+	Dark:  key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "light/dark preview")),
 	Back:  key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 	Quit:  key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 }
@@ -68,8 +90,10 @@ type model struct {
 	about   bool
 	aborted bool
 
-	splash *splash // nil once the splash screen is over
-	motion *motion
+	splash   *splash // nil once the splash screen is over
+	showDark bool    // preview the dark version (t toggles)
+	err      string  // shown under the form, e.g. a capture that failed
+	motion   *motion
 }
 
 // motion holds the springs behind the small animations: the preview's paper
@@ -117,9 +141,9 @@ func (m model) Init() tea.Cmd {
 
 // retarget points the springs at the current state.
 func (m model) retarget() {
-	pc := m.previewChoices()
-	m.motion.paper.set(pc.Paper())
-	m.motion.ink.set(pc.Ink())
+	o := m.previewOptions()
+	m.motion.paper.set(o.Paper)
+	m.motion.ink.set(o.Ink)
 	x, w := m.crumbSpan()
 	m.motion.crumbX.target, m.motion.crumbW.target = float64(x), float64(w)
 	if m.motion.off {
@@ -191,6 +215,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, globalKeys.About) && !m.typing():
 			m.about = true
 			return m, nil
+		case key.Matches(msg, globalKeys.Dark) && !m.typing() && m.choices.dark().Enabled():
+			m.showDark = !m.showDark
+			return m, m.animate(nil)
 		case key.Matches(msg, globalKeys.Back) && !m.filtering():
 			return m.back()
 		}
@@ -205,7 +232,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.aborted = true
 		return m, tea.Quit
 	case huh.StateCompleted:
-		if m.stage == stageEdit || m.choices.Restoring() {
+		if m.stage == stageEdit || m.choices.Restoring() || m.choices.Reapplying() || m.choices.Using() {
 			return m, tea.Quit
 		}
 		mm, cmd := m.startEditing()
@@ -235,10 +262,21 @@ func (m model) startEditing() (tea.Model, tea.Cmd) {
 	if load := m.env.LoadFaces; load != nil { // still scanning: finish now
 		m.env.Faces, m.env.LoadFaces = load(), nil
 	}
-	if m.choices.Mode == ModeEdit {
+	switch m.choices.Mode {
+	case ModeEdit:
 		if s, ok := m.selected(); ok {
 			m.choices = fromSaved(s, m.env.Faces)
 		}
+	case ModeCapture, ModeImport:
+		s, err := m.choices.Captured(m.env.ThemesDir)
+		if err != nil { // validated already, so this is rare: start over
+			m.err = err.Error()
+			m.form = newStartForm(m.choices, m.env)
+			return m, m.resized(m.form.Init())
+		}
+		m.err = ""
+		m.choices = fromSaved(s, m.env.Faces)
+		m.choices.Mode, m.choices.SavedSel = ModeCreate, ""
 	}
 	m.stage = stageEdit
 	m.form = newEditForm(m.choices, m.env)
@@ -260,12 +298,36 @@ func (m model) selected() (library.Saved, bool) {
 	return library.Saved{}, false
 }
 
+// previewDark reports whether the preview shows the dark version: always on
+// the Dark step, elsewhere when toggled with t.
+func (m model) previewDark() bool {
+	c := m.previewChoices()
+	return c.dark().Enabled() && (m.showDark || (m.stage == stageEdit && m.currentStep() == "Dark"))
+}
+
+// previewOptions are the theme options the preview draws.
+func (m model) previewOptions() theme.Options {
+	c := m.previewChoices()
+	o := c.Options()
+	if m.previewDark() {
+		o = o.DarkVariant(c.dark())
+	}
+	return o
+}
+
 // previewChoices is what the preview shows: the highlighted saved theme on
 // the start screen, otherwise the theme being edited.
 func (m model) previewChoices() *Choices {
 	if m.stage == stageStart {
-		if m.choices.Mode == ModeEdit {
-			if s, ok := m.selected(); ok {
+		sel := ""
+		switch m.choices.Mode {
+		case ModeEdit:
+			sel = m.choices.SavedSel
+		case ModeUse:
+			sel = m.choices.UseSel
+		}
+		for _, s := range m.env.Saved {
+			if sel != "" && library.Slug(s.Name) == sel {
 				return fromSaved(s, m.env.Faces)
 			}
 		}
@@ -281,7 +343,7 @@ func badge() string {
 // currentStep is the breadcrumb step of the focused field.
 func (m model) currentStep() string {
 	if f := m.form.GetFocusedField(); f != nil {
-		if s, ok := stepOf[f.GetKey()]; ok {
+		if s, ok := stepFor(f.GetKey()); ok {
 			return s
 		}
 	}
@@ -359,11 +421,13 @@ func (m model) aboutView() string {
 		t.Render("Piyush-linux/Bear-Notes-Theme for the install approach"),
 		"",
 		h.Render("How-to"),
-		t.Render("Font or size not changing? Bear's own Typography"),
-		t.Render("settings override themes. Say yes to setting them when"),
-		t.Render("you install, or pick the font in Bear → Settings."),
-		t.Render("After installing, quit Bear (⌘Q), reopen it, and choose"),
-		t.Render("the replaced theme in Settings → Themes."),
+		t.Render("After a Bear update, run bearty and choose Re-apply,"),
+		t.Render("or run `bearty reapply`. `bearty help` lists commands."),
+		t.Render("Bear ignores fonts in themes and uses one Typography"),
+		t.Render("setting for all of them. To switch themes with their"),
+		t.Render("fonts, use Switch Bear to a saved theme (bearty use)."),
+		t.Render("bearty quits and reopens Bear and selects the theme"),
+		t.Render("for you; press t to preview the dark version."),
 		t.Render("Bear can't draw ruled or grid pages, and it always uses"),
 		t.Render("the system font in the sidebar and note list."),
 		"",
@@ -393,17 +457,20 @@ func (m model) View() tea.View {
 		form := lipgloss.NewStyle().Width(formWidth).Render(m.form.View())
 		var body string
 		pc := m.previewChoices()
-		o := pc.Options()
+		o := m.previewOptions()
 		o.Paper, o.Ink = m.motion.paper.hex(), m.motion.ink.hex()
+		if m.err != "" {
+			form += "\n" + lipgloss.NewStyle().Foreground(errFg).Width(formWidth).Render(m.err)
+		}
 		switch {
-		case m.choices.Restoring():
+		case m.choices.Restoring() || m.choices.Reapplying():
 			body = form
 		case m.size.Width > 0 && m.size.Width < formWidth+previewWidth+8:
 			body = lipgloss.JoinVertical(lipgloss.Left, renderPreview(pc, o), "", form)
 		default:
 			body = lipgloss.JoinHorizontal(lipgloss.Top, form, "    ", renderPreview(pc, o))
 		}
-		content = lipgloss.JoinVertical(lipgloss.Left, m.header(), "", body, "", m.help.View(globalKeys))
+		content = lipgloss.JoinVertical(lipgloss.Left, m.header(), "", body, "", m.help.View(m.keys()))
 	}
 	v := paint(tea.NewView(lipgloss.NewStyle().Padding(1, 3).Render(content)))
 	v.AltScreen = true
@@ -415,6 +482,15 @@ func Run(env Env) (*Choices, error) {
 	c := defaults()
 	if len(env.Saved) > 0 {
 		c.SavedSel = library.Slug(env.Saved[0].Name)
+	}
+	for _, s := range env.Saved {
+		if s.Slot != "" { // switching between installed themes is the everyday task
+			c.Mode = ModeUse
+			break
+		}
+	}
+	if env.Reapply != "" {
+		c.Mode = ModeReapply
 	}
 	m := model{
 		form:    newStartForm(c, env),
@@ -445,4 +521,11 @@ func newHelp() help.Model {
 	h := help.New()
 	h.Styles = helpStyles()
 	return h
+}
+
+// keys shows the light/dark toggle only when there's a dark version.
+func (m model) keys() keys {
+	k := globalKeys
+	k.Dark.SetEnabled(m.choices.dark().Enabled())
+	return k
 }

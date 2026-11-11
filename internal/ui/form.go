@@ -2,15 +2,20 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/manojsachwani/bearty/internal/capture"
 	"github.com/manojsachwani/bearty/internal/fonts"
 	"github.com/manojsachwani/bearty/internal/library"
 	"github.com/manojsachwani/bearty/internal/theme"
@@ -22,6 +27,10 @@ const (
 	ModeCreate  = "create"
 	ModeEdit    = "edit"
 	ModeRestore = "restore"
+	ModeReapply = "reapply"
+	ModeCapture = "capture"
+	ModeImport  = "import"
+	ModeUse     = "use"
 
 	OutputInstall = "install"
 	OutputExport  = "export"
@@ -47,7 +56,10 @@ type Env struct {
 	Version    string
 	NoMotion   bool // skip the splash screen and animations
 
-	TypographyBackup bool // bearty saved the user's Bear typography and can put it back
+	TypographyBackup bool   // bearty saved the user's Bear settings and can put them back
+	BearRunning      bool   // Bear is open right now
+	ThemesDir        string // Bear's themes folder, for capturing
+	Reapply          string // theme a Bear update removed, offered first when set
 }
 
 // Choices holds everything the form collects.
@@ -66,13 +78,19 @@ type Choices struct {
 	Headings    string // theme.HeadingsInk, theme.HeadingsBlack or "custom"
 	HeadingsHex string
 
-	FontSrc    string // FontPicks, FontInstalled or FontGoogle
-	FontPick   string // PostScript name of a pick
-	FontQuery  string // narrows the installed family list
-	FontFamily string // installed family
-	FontFace   string // installed face, by PostScript name
-	GoogleName string // Google Fonts family
-	GooglePS   string // its PostScript name, once looked up
+	FontSrc     string // FontPicks, FontInstalled or FontGoogle
+	FontPick    string // PostScript name of a pick
+	FontQuery   string // narrows the installed family list
+	FontFamily  string // installed family
+	FontFace    string // installed face, by PostScript name
+	GoogleName  string // Google Fonts family
+	GooglePS    string // unused; kept so older code paths compile
+	GoogleStyle string // weight of a Google font, e.g. "700" or "300i"
+	PickStyle   string // weight of a pick: a Google style, or a Mac face's PostScript name
+
+	HeadingStyle string // weight of the heading pick, like PickStyle
+
+	knownPS map[string]string // PostScript names already known, by download source
 
 	HeadingFont   string // PostScript name for headings; empty = same as the text
 	headingSource string // where a heading font from a saved theme downloads from
@@ -85,6 +103,22 @@ type Choices struct {
 
 	AccentMode string // RegionsAuto: links, markers and ticks follow the ink
 	Accents    theme.Accents
+
+	DetailsMode  string // RegionsAuto or RegionsCustom: highlighters, code and tags
+	Highlights   theme.Highlights
+	Code         theme.CodeColors // Code.Font is chosen on the Type step either way
+	Tag          theme.TagColors
+	HeadingScale float64
+	Extra        map[string]any // kept from a captured theme; not edited here
+
+	Dark     theme.Dark
+	DarkSlot string
+	Restart  bool // quit and reopen Bear around the install
+
+	UseSel      string // slug of the installed theme to switch Bear to
+	CaptureSlot string
+	ImportPath  string
+	NewName     string // name for a captured or imported theme
 
 	Output   string
 	SavePath string
@@ -113,6 +147,8 @@ func defaults() *Choices {
 		FontPick:          fonts.Picks[0].PostScript,
 		Regions:           RegionsAuto,
 		AccentMode:        RegionsAuto,
+		DetailsMode:       RegionsAuto,
+		Restart:           true,
 		Output:            OutputInstall,
 		SetTypography:     true,
 		RestoreTypography: true,
@@ -146,10 +182,17 @@ func fromSaved(s library.Saved, faces []fonts.Face) *Choices {
 		c.Headings = s.Headings
 	}
 
-	if _, ok := fonts.PickByPostScript(s.Font); ok {
-		c.FontSrc, c.FontPick = FontPicks, s.Font
+	c.knownPS = map[string]string{}
+	if s.FontSource != "" && s.Font != "" {
+		c.knownPS[s.FontSource] = s.Font
+	}
+	if s.HeadingFontSource != "" && s.HeadingFont != "" {
+		c.knownPS[s.HeadingFontSource] = s.HeadingFont
+	}
+	if p, style, ok := pickFor(s.Font, s.FontSource, faces); ok {
+		c.FontSrc, c.FontPick, c.PickStyle = FontPicks, p.PostScript, style
 	} else if fam, ok := fonts.GoogleFamily(s.FontSource); ok {
-		c.FontSrc, c.GoogleName, c.GooglePS = FontGoogle, fam, s.Font
+		c.FontSrc, c.GoogleName, c.GoogleStyle = FontGoogle, fam, fonts.GoogleStyleOf(s.FontSource)
 	} else if f, ok := fonts.ByPostScript(faces, s.Font); ok {
 		c.FontSrc, c.FontFamily, c.FontFace = FontInstalled, f.Family, f.PostScript
 	} else if s.Font != "" {
@@ -161,7 +204,15 @@ func fromSaved(s library.Saved, faces []fonts.Face) *Choices {
 		c.Regions = RegionsCustom
 	}
 	c.Accents = s.Accents
+	c.Highlights, c.Code, c.Tag, c.HeadingScale = s.Highlights, s.Code, s.Tag, s.HeadingScale
+	c.Extra, c.Dark, c.DarkSlot = s.Extra, s.Dark, s.DarkSlot
+	if !s.Highlights.IsZero() || !s.Tag.IsZero() || (s.Code != theme.CodeColors{Font: s.Code.Font}) {
+		c.DetailsMode = RegionsCustom
+	}
 	c.HeadingFont, c.headingSource, c.Type = s.HeadingFont, s.HeadingFontSource, s.Type
+	if p, style, ok := pickFor(s.HeadingFont, s.HeadingFontSource, faces); ok {
+		c.HeadingFont, c.HeadingStyle = p.PostScript, style
+	}
 	if !s.Accents.IsZero() {
 		c.AccentMode = RegionsCustom
 	}
@@ -185,14 +236,53 @@ func (c *Choices) Paper() string { return pick(c.PaperSel, c.PaperHex, theme.Pap
 func (c *Choices) Ink() string { return pick(c.InkSel, c.InkHex, theme.Inks[0].Hex) }
 
 // Font is the chosen typeface, with the heading font if one was chosen.
-// A Google font that isn't one of the picks has no PostScript name until it
-// has been looked up.
+// A Google weight that hasn't been downloaded yet has no PostScript name;
+// it's filled in when bearty fetches the file.
 func (c *Choices) Font() theme.Font {
 	f := c.textFont()
 	if c.HeadingFont != "" {
-		f.Heading = c.HeadingFont
+		f.Heading = c.headingPS()
 	}
 	return f
+}
+
+// isStyle reports whether s is a Google style such as "700" or "300i".
+func isStyle(s string) bool {
+	s = strings.TrimSuffix(s, "i")
+	_, err := strconv.Atoi(s)
+	return err == nil
+}
+
+// pickFont resolves a pick plus its chosen weight to a PostScript name, a
+// display name and a download source.
+func (c *Choices) pickFont(p fonts.Pick, weight string) (ps, name, source string) {
+	if fam, isGoogle := fonts.GoogleFamily(p.Source); isGoogle {
+		style := fonts.RegularStyle
+		if isStyle(weight) {
+			style = weight
+		}
+		source = fonts.GoogleSourceStyle(fam, style)
+		if style == fonts.RegularStyle {
+			return p.PostScript, p.Name, source
+		}
+		return c.knownPS[source], p.Name + " " + fonts.StyleLabel(style), source
+	}
+	// A Mac or Bear font: the weight is one of the family's faces.
+	if base, ok := fonts.ByPostScript(c.faces, p.PostScript); ok {
+		if f, ok := fonts.ByPostScript(fonts.Styles(c.faces, base.Family), weight); ok && f.PostScript != p.PostScript {
+			return f.PostScript, p.Name + " " + f.Style, p.Source
+		}
+	}
+	return p.PostScript, p.Name, p.Source
+}
+
+// headingPS is the PostScript name of the chosen heading font and weight.
+func (c *Choices) headingPS() string {
+	if p, ok := fonts.PickByPostScript(c.HeadingFont); ok {
+		ps, _, _ := c.pickFont(p, c.HeadingStyle)
+		return ps
+	}
+	return c.HeadingFont
 }
 
 // HeadingFontSource says where the heading font downloads from, if anywhere.
@@ -201,7 +291,8 @@ func (c *Choices) HeadingFontSource() string {
 		return fonts.SourceInstalled
 	}
 	if p, ok := fonts.PickByPostScript(c.HeadingFont); ok {
-		return p.Source
+		_, _, source := c.pickFont(p, c.HeadingStyle)
+		return source
 	}
 	return c.headingSource
 }
@@ -209,7 +300,8 @@ func (c *Choices) HeadingFontSource() string {
 // HeadingFontName is the heading font's display name.
 func (c *Choices) HeadingFontName() string {
 	if p, ok := fonts.PickByPostScript(c.HeadingFont); ok {
-		return p.Name
+		_, name, _ := c.pickFont(p, c.HeadingStyle)
+		return name
 	}
 	return c.HeadingFont
 }
@@ -226,16 +318,28 @@ func (c *Choices) textFont() theme.Font {
 		}
 		return theme.Font{Name: c.FontFamily, PostScript: ps, Heading: ps}
 	case FontGoogle:
-		ps := c.GooglePS
-		for _, p := range fonts.Picks {
-			if fam, ok := fonts.GoogleFamily(p.Source); ok && strings.EqualFold(fam, strings.TrimSpace(c.GoogleName)) {
-				ps = p.PostScript
+		name := strings.TrimSpace(c.GoogleName)
+		source := c.FontSource()
+		ps := c.knownPS[source]
+		if fonts.GoogleStyleOf(source) == fonts.RegularStyle {
+			for _, p := range fonts.Picks {
+				if fam, ok := fonts.GoogleFamily(p.Source); ok && strings.EqualFold(fam, name) {
+					ps = p.PostScript
+				}
 			}
 		}
-		return theme.Font{Name: c.GoogleName, PostScript: ps, Heading: ps}
+		if s := fonts.GoogleStyleOf(source); s != fonts.RegularStyle {
+			name += " " + fonts.StyleLabel(s)
+		}
+		return theme.Font{Name: name, PostScript: ps, Heading: ps}
 	}
 	if p, ok := fonts.PickByPostScript(c.FontPick); ok {
-		return theme.Font{Name: p.Name, PostScript: p.PostScript, Heading: p.HeadingFont()}
+		ps, name, _ := c.pickFont(p, c.PickStyle)
+		heading := p.HeadingFont()
+		if ps != p.PostScript {
+			heading = ps // a chosen weight applies to headings too
+		}
+		return theme.Font{Name: name, PostScript: ps, Heading: heading}
 	}
 	return theme.Font{Name: c.FontPick, PostScript: c.FontPick, Heading: c.FontPick}
 }
@@ -244,10 +348,15 @@ func (c *Choices) textFont() theme.Font {
 func (c *Choices) FontSource() string {
 	switch c.FontSrc {
 	case FontGoogle:
-		return fonts.GoogleSource(strings.TrimSpace(c.GoogleName))
+		style := fonts.RegularStyle
+		if isStyle(c.GoogleStyle) {
+			style = c.GoogleStyle
+		}
+		return fonts.GoogleSourceStyle(strings.TrimSpace(c.GoogleName), style)
 	case FontPicks:
 		if p, ok := fonts.PickByPostScript(c.FontPick); ok {
-			return p.Source
+			_, _, source := c.pickFont(p, c.PickStyle)
+			return source
 		}
 	}
 	return fonts.SourceInstalled
@@ -255,6 +364,40 @@ func (c *Choices) FontSource() string {
 
 // Restoring reports whether the user chose to restore instead of create.
 func (c *Choices) Restoring() bool { return c.Mode == ModeRestore }
+
+// Reapplying reports whether the user chose to put back the last install.
+func (c *Choices) Reapplying() bool { return c.Mode == ModeReapply }
+
+// Using reports whether the user chose to switch Bear to an installed theme.
+func (c *Choices) Using() bool { return c.Mode == ModeUse }
+
+// details returns highlighter, code and tag overrides; the code font always
+// counts, the colours only when chosen.
+func (c *Choices) details() (theme.Highlights, theme.CodeColors, theme.TagColors) {
+	if c.DetailsMode != RegionsCustom {
+		return theme.Highlights{}, theme.CodeColors{Font: c.Code.Font}, theme.TagColors{}
+	}
+	return c.Highlights, c.Code, c.Tag
+}
+
+// codeSource says where the code font downloads from, if anywhere.
+func (c *Choices) codeSource() string {
+	if p, ok := fonts.CodePickByPostScript(c.Code.Font); ok {
+		return p.Source
+	}
+	return fonts.SourceInstalled
+}
+
+// dark returns the dark settings, dropping colours a mode doesn't use.
+func (c *Choices) dark() theme.Dark {
+	switch c.Dark.Mode {
+	case theme.DarkAuto:
+		return theme.Dark{Mode: theme.DarkAuto}
+	case theme.DarkCustom:
+		return c.Dark
+	}
+	return theme.Dark{}
+}
 
 // Installing and Exporting report the chosen outputs.
 func (c *Choices) Installing() bool { return c.Output == OutputInstall || c.Output == OutputBoth }
@@ -287,22 +430,27 @@ func (c *Choices) regions() (theme.SidebarColors, theme.NoteListColors) {
 // Options converts the choices for the theme builder.
 func (c *Choices) Options() theme.Options {
 	side, list := c.regions()
+	hl, code, tag := c.details()
 	return theme.Options{
 		Name: c.Name, Paper: c.Paper(), Ink: c.Ink(), Font: c.Font(), Size: c.Size,
 		Headings: c.headings(), Lines: c.Lines, Sidebar: side, NoteList: list,
 		Accents: c.accents(), Type: c.Type,
+		Highlights: hl, Code: code, Tag: tag, HeadingScale: c.HeadingScale, Extra: c.Extra,
 	}
 }
 
 // Saved converts the choices for the theme library.
 func (c *Choices) Saved() library.Saved {
 	side, list := c.regions()
+	hl, code, tag := c.details()
 	return library.Saved{
 		Name: strings.TrimSpace(c.Name), Paper: c.Paper(), Ink: c.Ink(),
 		Font: c.Font().PostScript, FontSource: c.FontSource(), Size: c.Size,
 		Headings: c.headings(), Lines: c.Lines, Slot: c.Slot,
 		Sidebar: side, NoteList: list, Accents: c.accents(),
-		HeadingFont: c.HeadingFont, HeadingFontSource: c.HeadingFontSource(), Type: c.Type,
+		HeadingFont: c.savedHeadingFont(), HeadingFontSource: c.HeadingFontSource(), Type: c.Type,
+		Highlights: hl, Code: code, CodeSource: c.codeSource(), Tag: tag, HeadingScale: c.HeadingScale,
+		Extra: c.Extra, Dark: c.dark(), DarkSlot: c.DarkSlot,
 	}
 }
 
@@ -331,6 +479,78 @@ func colourInput(c *Choices, key, title string, v *string, effective func(theme.
 		*v = saved
 		return auto
 	})
+}
+
+// pickFor finds the handwriting pick a saved font belongs to and the
+// weight chosen for it.
+func pickFor(ps, source string, faces []fonts.Face) (fonts.Pick, string, bool) {
+	if p, ok := fonts.PickByPostScript(ps); ok {
+		return p, "", true
+	}
+	if fam, ok := fonts.GoogleFamily(source); ok {
+		for _, p := range fonts.Picks {
+			if pf, ok := fonts.GoogleFamily(p.Source); ok && strings.EqualFold(pf, fam) {
+				return p, fonts.GoogleStyleOf(source), true
+			}
+		}
+		return fonts.Pick{}, "", false
+	}
+	if f, ok := fonts.ByPostScript(faces, ps); ok {
+		for _, p := range fonts.Picks {
+			if base, ok := fonts.ByPostScript(faces, p.PostScript); ok && base.Family == f.Family {
+				return p, ps, true
+			}
+		}
+	}
+	return fonts.Pick{}, "", false
+}
+
+// weightOptions lists the weights of a pick: a Google family's styles (looked
+// up online, in the background) or a Mac family's faces.
+func weightOptions(c *Choices, pickPS string) []huh.Option[string] {
+	p, ok := fonts.PickByPostScript(pickPS)
+	if !ok {
+		return []huh.Option[string]{huh.NewOption("Regular", "")}
+	}
+	if fam, isGoogle := fonts.GoogleFamily(p.Source); isGoogle {
+		return googleWeightOptions(fam)
+	}
+	base, ok := fonts.ByPostScript(c.faces, p.PostScript)
+	if !ok {
+		return []huh.Option[string]{huh.NewOption("Regular", "")}
+	}
+	var opts []huh.Option[string]
+	for _, f := range fonts.Styles(c.faces, base.Family) {
+		o := huh.NewOption(f.Style, f.PostScript)
+		if f.PostScript == p.PostScript {
+			o = o.Selected(true)
+		}
+		opts = append(opts, o)
+	}
+	return opts
+}
+
+// googleWeightOptions lists a Google family's styles. Huh runs this in the
+// background, so the network call doesn't block typing.
+func googleWeightOptions(family string) []huh.Option[string] {
+	regular := []huh.Option[string]{huh.NewOption("Regular", fonts.RegularStyle)}
+	if fonts.GoogleSlug(family) == "" {
+		return regular
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	styles, err := fonts.GoogleStyles(ctx, family)
+	if err != nil {
+		return regular
+	}
+	opts := make([]huh.Option[string], len(styles))
+	for i, st := range styles {
+		opts[i] = huh.NewOption(fonts.StyleLabel(st), st)
+		if st == fonts.RegularStyle {
+			opts[i] = opts[i].Selected(true)
+		}
+	}
+	return opts
 }
 
 // pickOptions lists the handwriting picks, marking ones that download.
@@ -437,12 +657,50 @@ func styled(f *huh.Form) *huh.Form {
 
 // newStartForm asks what to do: create, edit a saved theme, or restore.
 func newStartForm(c *Choices, env Env) *huh.Form {
-	modes := []huh.Option[string]{
+	var modes []huh.Option[string]
+	if env.Reapply != "" {
+		modes = append(modes, huh.NewOption(fmt.Sprintf("Re-apply %s after Bear's update", env.Reapply), ModeReapply))
+	}
+	var installed []huh.Option[string]
+	for _, s := range env.Saved {
+		if s.Slot != "" {
+			label := swatch(s.Paper) + swatch(s.Ink) + " " + s.Name +
+				lipgloss.NewStyle().Foreground(dim).Render("  in "+s.Slot)
+			installed = append(installed, huh.NewOption(label, library.Slug(s.Name)))
+		}
+	}
+	if len(installed) > 0 {
+		modes = append(modes, huh.NewOption("Switch Bear to a saved theme", ModeUse))
+		if c.UseSel == "" {
+			c.UseSel = installed[0].Value
+		}
+	}
+	modes = append(modes,
 		huh.NewOption("Create a new theme", ModeCreate),
 		huh.NewOption("Edit a saved theme", ModeEdit),
+	)
+	if len(env.Slots) > 0 {
+		modes = append(modes, huh.NewOption("Capture one of Bear's themes", ModeCapture))
 	}
+	modes = append(modes, huh.NewOption("Import a .theme file", ModeImport))
 	if len(env.Backups) > 0 {
 		modes = append(modes, huh.NewOption("Restore an original Bear theme", ModeRestore))
+	}
+
+	taken := map[string]bool{}
+	for _, s := range env.Saved {
+		taken[library.Slug(s.Name)] = true
+	}
+	newName := func(fallback func() string) func(string) error {
+		return func(v string) error {
+			if v == "" {
+				v = fallback()
+			}
+			if taken[library.Slug(v)] {
+				return fmt.Errorf("you already have a theme called %q; type another name", v)
+			}
+			return nil
+		}
 	}
 
 	saved := make([]huh.Option[string], len(env.Saved))
@@ -466,6 +724,45 @@ func newStartForm(c *Choices, env Env) *huh.Form {
 		).WithHideFunc(func() bool { return c.Mode != ModeEdit }),
 
 		huh.NewGroup(
+			huh.NewSelect[string]().Key("use").Title("Which theme?").
+				Description("bearty selects it in Bear and sets Bear's fonts and sizes to match. Bear can't do the fonts itself: it draws every theme with one set of Typography settings.").
+				Options(installed...).Height(min(len(installed), 8)+5).Value(&c.UseSel),
+			huh.NewConfirm().Key("use-restart").
+				Title(restartTitle(env.BearRunning)).
+				Description("Bear only loads theme changes when it starts.").
+				Affirmative("Yes").Negative("No, I'll do it").Value(&c.Restart),
+		).WithHideFunc(func() bool { return c.Mode != ModeUse }),
+
+		huh.NewGroup(
+			huh.NewConfirm().Key("reapply-restart").
+				Title(restartTitle(env.BearRunning)).
+				Description("bearty copies back its own copy of the theme and fonts. You'll be asked for your password.").
+				Affirmative("Yes").Negative("No, I'll do it").Value(&c.Restart),
+		).WithHideFunc(func() bool { return c.Mode != ModeReapply }),
+
+		huh.NewGroup(
+			huh.NewSelect[string]().Key("capture").Title("Which Bear theme?").
+				Description("It becomes a bearty theme you can edit. Everything bearty can't edit is kept as it is.").
+				Options(huh.NewOptions(env.Slots...)...).Height(14).Value(&c.CaptureSlot),
+			huh.NewInput().Key("capture-name").Title("Name it").
+				PlaceholderFunc(func() string { return c.CaptureSlot }, &c.CaptureSlot).
+				Value(&c.NewName).Validate(newName(func() string { return c.CaptureSlot })),
+		).WithHideFunc(func() bool { return c.Mode != ModeCapture }),
+
+		huh.NewGroup(
+			huh.NewInput().Key("import").Title("Theme file").
+				Description("A Bear .theme file, e.g. one someone shared or bearty exported.").
+				Placeholder("~/Downloads/my.theme").Value(&c.ImportPath).
+				Validate(func(v string) error {
+					_, err := capture.File(expandHome(v), env.ThemesDir, "check")
+					return err
+				}),
+			huh.NewInput().Key("import-name").Title("Name it").
+				PlaceholderFunc(func() string { return importName(c.ImportPath) }, &c.ImportPath).
+				Value(&c.NewName).Validate(newName(func() string { return importName(c.ImportPath) })),
+		).WithHideFunc(func() bool { return c.Mode != ModeImport }),
+
+		huh.NewGroup(
 			huh.NewSelect[string]().Key("restore").Title("Which theme should be restored?").
 				Description("Only themes bearty backed up are listed.").
 				Options(huh.NewOptions(env.Backups...)...).Height(min(len(env.Backups), 8)+3).Value(&c.RestoreSlot),
@@ -482,8 +779,8 @@ func newStartForm(c *Choices, env Env) *huh.Form {
 				Affirmative("Remove").Negative("Keep").Value(&c.RemoveFonts),
 		).WithHideFunc(func() bool { return !c.Restoring() || !c.RestoreConfirm || len(env.AddedFonts) == 0 }),
 		huh.NewGroup(
-			huh.NewConfirm().Key("restore-typography").Title("Also restore your own Bear typography?").
-				Description("Puts back the font, size and spacing you had before bearty changed them.").
+			huh.NewConfirm().Key("restore-typography").Title("Also restore your own Bear settings?").
+				Description("Puts back the font, size, spacing and theme choice you had before bearty changed them.").
 				Affirmative("Restore").Negative("Keep").Value(&c.RestoreTypography),
 		).WithHideFunc(func() bool { return !c.Restoring() || !c.RestoreConfirm || !env.TypographyBackup }),
 	))
@@ -492,6 +789,14 @@ func newStartForm(c *Choices, env Env) *huh.Form {
 // newEditForm edits every setting of the theme in c.
 func newEditForm(c *Choices, env Env) *huh.Form {
 	c.faces = env.Faces
+	// Start the slot lists on Bear's plain light and dark themes, unless the
+	// theme was installed somewhere before.
+	if c.Slot == "" && slices.Contains(env.Slots, "Notes") {
+		c.Slot = "Notes"
+	}
+	if c.DarkSlot == "" && slices.Contains(env.Slots, "Dark Notes") {
+		c.DarkSlot = "Dark Notes"
+	}
 	picks := pickOptions(c, env.Faces)
 	families := fonts.Families(env.Faces)
 	sizes := make([]huh.Option[int], 0, len(theme.Sizes)+1)
@@ -596,6 +901,9 @@ func newEditForm(c *Choices, env Env) *huh.Form {
 			huh.NewSelect[string]().Key("pick").Title("Handwriting").
 				Description("Fonts marked ↓ are downloaded when you install.").
 				Options(picks...).Height(min(len(picks), 12)+3).Value(&c.FontPick),
+			huh.NewSelect[string]().Key("pickweight").Title("Weight").
+				OptionsFunc(func() []huh.Option[string] { return weightOptions(c, c.FontPick) }, &c.FontPick).
+				Height(8).Value(&c.PickStyle),
 		).WithHideFunc(func() bool { return c.FontSrc != FontPicks }),
 		huh.NewGroup(
 			huh.NewInput().Key("fontquery").Title("Search fonts").
@@ -630,14 +938,35 @@ func newEditForm(c *Choices, env Env) *huh.Form {
 					}
 					return nil
 				}),
+			huh.NewSelect[string]().Key("googleweight").Title("Weight").
+				Description("Looked up on Google Fonts as you type.").
+				OptionsFunc(func() []huh.Option[string] { return googleWeightOptions(c.GoogleName) }, &c.GoogleName).
+				Height(8).Value(&c.GoogleStyle),
 		).WithHideFunc(func() bool { return c.FontSrc != FontGoogle }),
 		huh.NewGroup(
 			huh.NewSelect[string]().Key("headingfont").Title("Heading typeface").
 				Options(headingFonts...).Height(min(len(headingFonts), 12)+2).Value(&c.HeadingFont),
+			huh.NewSelect[string]().Key("headingweight").Title("Heading weight").
+				OptionsFunc(func() []huh.Option[string] {
+					if c.HeadingFont == "" {
+						return []huh.Option[string]{huh.NewOption("Same as the text", "")}
+					}
+					return weightOptions(c, c.HeadingFont)
+				}, &c.HeadingFont).
+				Height(8).Value(&c.HeadingStyle),
+		),
+		huh.NewGroup(
+			huh.NewSelect[string]().Key("codefont").Title("Code font").
+				Description("For code blocks and inline code.").
+				Options(codeFontOptions(c, env.Faces)...).Height(12).Value(&c.Code.Font),
 		),
 
 		huh.NewGroup(
 			huh.NewSelect[int]().Key("size").Title("Size").Options(sizes...).Inline(true).Value(&c.Size),
+			huh.NewSelect[float64]().Key("headingscale").Title("Heading sizes").
+				Description("How much bigger each heading level is.").
+				Options(floatOptions([]float64{1.05, 1.1, 1.2, 1.25, 1.3, 1.4}, c.HeadingScale, "1.15 (default)")...).
+				Inline(true).Value(&c.HeadingScale),
 			huh.NewSelect[float64]().Key("lineheight").Title("Line height").
 				Options(floatOptions([]float64{1.2, 1.3, 1.4, 1.5, 1.8, 2}, c.Type.LineHeight, "1.6 (default)")...).
 				Inline(true).Value(&c.Type.LineHeight),
@@ -685,6 +1014,71 @@ func newEditForm(c *Choices, env Env) *huh.Form {
 		).Title("Note list").WithHideFunc(func() bool { return c.Regions != RegionsCustom }),
 
 		huh.NewGroup(
+			huh.NewSelect[string]().Key("details").Title("Highlighters, code and tags").
+				Description("Automatic colors are worked out from your paper and ink.").
+				Options(
+					huh.NewOption("Automatic", RegionsAuto),
+					huh.NewOption("Pick each color", RegionsCustom),
+				).Height(5).Value(&c.DetailsMode),
+		),
+		huh.NewGroup(
+			colourInput(c, "hl-default", "Default highlighter", &c.Highlights.Default,
+				func(o theme.Options) string { return o.HighlightsResolved().Default }),
+			colourInput(c, "hl-red", "Red", &c.Highlights.Red,
+				func(o theme.Options) string { return o.HighlightsResolved().Red }),
+			colourInput(c, "hl-blue", "Blue", &c.Highlights.Blue,
+				func(o theme.Options) string { return o.HighlightsResolved().Blue }),
+			colourInput(c, "hl-green", "Green", &c.Highlights.Green,
+				func(o theme.Options) string { return o.HighlightsResolved().Green }),
+			colourInput(c, "hl-yellow", "Yellow", &c.Highlights.Yellow,
+				func(o theme.Options) string { return o.HighlightsResolved().Yellow }),
+			colourInput(c, "hl-purple", "Purple", &c.Highlights.Purple,
+				func(o theme.Options) string { return o.HighlightsResolved().Purple }),
+		).Title("Highlighters").WithHideFunc(func() bool { return c.DetailsMode != RegionsCustom }),
+		huh.NewGroup(
+			colourInput(c, "code-bg", "Code background", &c.Code.Background,
+				func(o theme.Options) string { return o.CodeResolved().Background }),
+			colourInput(c, "code-text", "Code text", &c.Code.Text,
+				func(o theme.Options) string { return o.CodeResolved().Text }),
+			colourInput(c, "code-keyword", "Keywords", &c.Code.Keyword,
+				func(o theme.Options) string { return o.CodeResolved().Keyword }),
+			colourInput(c, "code-string", "Strings", &c.Code.String,
+				func(o theme.Options) string { return o.CodeResolved().String }),
+			colourInput(c, "code-number", "Numbers", &c.Code.Number,
+				func(o theme.Options) string { return o.CodeResolved().Number }),
+			colourInput(c, "code-comment", "Comments", &c.Code.Comment,
+				func(o theme.Options) string { return o.CodeResolved().Comment }),
+			colourInput(c, "code-function", "Functions", &c.Code.Function,
+				func(o theme.Options) string { return o.CodeResolved().Function }),
+			colourInput(c, "code-variable", "Variables", &c.Code.Variable,
+				func(o theme.Options) string { return o.CodeResolved().Variable }),
+			colourInput(c, "code-constant", "Constants", &c.Code.Constant,
+				func(o theme.Options) string { return o.CodeResolved().Constant }),
+			colourInput(c, "code-entity", "Types and entities", &c.Code.Entity,
+				func(o theme.Options) string { return o.CodeResolved().Entity }),
+		).Title("Code blocks").WithHideFunc(func() bool { return c.DetailsMode != RegionsCustom }),
+		huh.NewGroup(
+			colourInput(c, "tag-bg", "Tag background", &c.Tag.Background,
+				func(o theme.Options) string { return o.TagResolved().Background }),
+			colourInput(c, "tag-text", "Tag text", &c.Tag.Text,
+				func(o theme.Options) string { return o.TagResolved().Text }),
+		).Title("Tags").WithHideFunc(func() bool { return c.DetailsMode != RegionsCustom }),
+
+		huh.NewGroup(
+			huh.NewSelect[string]().Key("dark").Title("Dark mode").
+				Description("Bear uses a separate theme when your Mac is in dark mode.").
+				Options(
+					huh.NewOption("Use this theme in dark mode too", theme.DarkOff),
+					huh.NewOption("Add an automatic dark version", theme.DarkAuto),
+					huh.NewOption("Choose the dark paper and ink", theme.DarkCustom),
+				).Height(6).Value(&c.Dark.Mode),
+		),
+		huh.NewGroup(
+			newPicker("darkpaper", "Dark paper", &c.Dark.Paper, func() string { return theme.DarkPaperFor(c.Paper()) }),
+			newPicker("darkink", "Dark ink", &c.Dark.Ink, func() string { return theme.DarkInkFor(c.Ink()) }),
+		).WithHideFunc(func() bool { return c.Dark.Mode != theme.DarkCustom }),
+
+		huh.NewGroup(
 			huh.NewSelect[string]().Key("output").Title("What should bearty do with it?").Description(outputDesc).
 				Options(outputs...).Height(len(outputs)+4).Value(&c.Output),
 		),
@@ -695,19 +1089,117 @@ func newEditForm(c *Choices, env Env) *huh.Form {
 
 		huh.NewGroup(
 			huh.NewSelect[string]().Key("slot").Title("Which Bear theme should it replace?").
-				Description("Bear can't add new themes, so bearty replaces one. Afterwards, choose this name in Bear → Settings → Themes.").
+				Description("Bear can't add new themes, so bearty replaces one and selects it for you.").
 				Options(huh.NewOptions(env.Slots...)...).Height(14).Value(&c.Slot),
+		).WithHideFunc(func() bool { return !c.Installing() }),
+		huh.NewGroup(
+			huh.NewSelect[string]().Key("darkslot").Title("Which Bear theme should the dark version replace?").
+				Description("A second slot, used when your Mac is in dark mode.").
+				Options(huh.NewOptions(env.Slots...)...).Height(14).Value(&c.DarkSlot).
+				Validate(func(v string) error {
+					if v == c.Slot {
+						return errors.New("pick a different theme from the light one")
+					}
+					return nil
+				}),
+		).WithHideFunc(func() bool { return !c.Installing() || !c.dark().Enabled() }),
+		huh.NewGroup(
 			huh.NewConfirm().Key("confirm").
-				TitleFunc(func() string { return fmt.Sprintf("Replace %q?", c.Slot) }, &c.Slot).
-				DescriptionFunc(func() string {
-					return fmt.Sprintf("The original is backed up to ~/Downloads/%s.original.theme. You'll be asked for your password.", c.Slot)
-				}, &c.Slot).
+				TitleFunc(func() string {
+					if c.dark().Enabled() {
+						return fmt.Sprintf("Replace %q and %q?", c.Slot, c.DarkSlot)
+					}
+					return fmt.Sprintf("Replace %q?", c.Slot)
+				}, c).
+				Description("The originals are backed up to ~/Downloads. You'll be asked for your password.").
 				Affirmative("Replace").Negative("Don't install").Value(&c.Confirm),
 		).WithHideFunc(func() bool { return !c.Installing() }),
 		huh.NewGroup(
-			huh.NewConfirm().Key("typography").Title("Also set Bear's typography to match?").
-				Description("Bear's own Typography settings override a theme's font and size. Your current settings are saved first, and Restore puts them back.").
+			huh.NewConfirm().Key("typography").Title("Use this theme's fonts in Bear?").
+				Description("Bear ignores fonts inside themes and uses one set of Typography settings for every theme, so bearty sets them to this theme's fonts and sizes. Your own settings are saved first, and Restore puts them back. To switch themes later with their fonts, use Switch Bear to a saved theme.").
 				Affirmative("Yes, set it").Negative("No").Value(&c.SetTypography),
 		).WithHideFunc(func() bool { return !c.Installing() || !c.Confirm }),
+		huh.NewGroup(
+			huh.NewConfirm().Key("restart").
+				Title(restartTitle(env.BearRunning)).
+				Description("Bear only loads themes when it starts.").
+				Affirmative("Yes").Negative("No, I'll do it").Value(&c.Restart),
+		).WithHideFunc(func() bool { return !c.Installing() || !c.Confirm }),
 	))
+}
+
+// savedHeadingFont is the heading font's PostScript name for saving: empty
+// when headings use the text font.
+func (c *Choices) savedHeadingFont() string {
+	if c.HeadingFont == "" {
+		return ""
+	}
+	return c.headingPS()
+}
+
+func restartTitle(running bool) string {
+	if running {
+		return "Quit and reopen Bear to apply it now?"
+	}
+	return "Open Bear when it's done?"
+}
+
+// codeFontOptions lists the code font picks, marking ones that download and
+// leaving out Mac fonts this Mac doesn't have.
+func codeFontOptions(c *Choices, faces []fonts.Face) []huh.Option[string] {
+	tag := lipgloss.NewStyle().Foreground(dim)
+	var opts []huh.Option[string]
+	known := false
+	for _, p := range fonts.CodePicks {
+		label := p.Name
+		_, have := fonts.ByPostScript(faces, p.PostScript)
+		switch {
+		case p.Source != fonts.SourceInstalled && !have:
+			label += tag.Render("  ↓ download")
+		case !have && p.PostScript != theme.DefaultCodeFont:
+			continue
+		}
+		value := p.PostScript
+		if value == theme.DefaultCodeFont {
+			value = "" // Bear's default
+		}
+		opts = append(opts, huh.NewOption(label, value))
+		known = known || value == c.Code.Font
+	}
+	if !known && c.Code.Font != "" {
+		opts = append(opts, huh.NewOption(c.Code.Font+tag.Render("  from file"), c.Code.Font))
+	}
+	return opts
+}
+
+// expandHome turns a leading ~ into the home folder.
+func expandHome(p string) string {
+	p = strings.TrimSpace(p)
+	if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, rest)
+		}
+	}
+	return p
+}
+
+// importName suggests a name from a theme file's name.
+func importName(path string) string {
+	return strings.TrimSuffix(filepath.Base(strings.TrimSpace(path)), ".theme")
+}
+
+// Captured turns the capture or import choices into a saved theme.
+func (c *Choices) Captured(themesDir string) (library.Saved, error) {
+	if c.Mode == ModeCapture {
+		name := c.NewName
+		if name == "" {
+			name = c.CaptureSlot
+		}
+		return capture.File(filepath.Join(themesDir, c.CaptureSlot+".theme"), themesDir, name)
+	}
+	name := c.NewName
+	if name == "" {
+		name = importName(c.ImportPath)
+	}
+	return capture.File(expandHome(c.ImportPath), themesDir, name)
 }

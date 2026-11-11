@@ -1,16 +1,16 @@
 // Command bearty builds custom themes for the Bear notes app and can
 // install them into one of Bear's built-in theme slots.
+//
+// Run it with no arguments for the interactive editor, or with a command
+// (see `bearty help`) to script it.
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
-	"time"
 
 	"charm.land/lipgloss/v2"
 
@@ -23,20 +23,32 @@ import (
 
 var version = "dev"
 
-var (
-	ok   = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Inks[0].Hex)).Render("✓")
-	warn = lipgloss.NewStyle().Foreground(lipgloss.Color("#E5B92E")).Render("!")
-)
+// ok and warn mark output lines, in colour only when printing to a terminal.
+var ok, warn = "✓", "!"
+
+func init() {
+	if ui.Interactive() {
+		ok = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.Inks[0].Hex)).Render(ok)
+		warn = lipgloss.NewStyle().Foreground(lipgloss.Color("#E5B92E")).Render(warn)
+	}
+}
 
 func main() {
-	showVersion := flag.Bool("version", false, "print the version and exit")
-	noMotion := flag.Bool("no-motion", os.Getenv("BEARTY_NO_MOTION") != "", "skip the splash screen and animations (or set BEARTY_NO_MOTION)")
-	flag.Parse()
-	if *showVersion {
-		fmt.Println("bearty", version)
-		return
+	var err error
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		err = runCommand(os.Args[1], os.Args[2:])
+	} else {
+		showVersion := flag.Bool("version", false, "print the version and exit")
+		noMotion := flag.Bool("no-motion", os.Getenv("BEARTY_NO_MOTION") != "", "skip the splash screen and animations (or set BEARTY_NO_MOTION)")
+		flag.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+		flag.Parse()
+		if *showVersion {
+			fmt.Println("bearty", version)
+			return
+		}
+		err = runTUI(*noMotion)
 	}
-	if err := run(*noMotion); err != nil {
+	if err != nil {
 		if errors.Is(err, ui.ErrAborted) {
 			return
 		}
@@ -45,94 +57,68 @@ func main() {
 	}
 }
 
-func run(noMotion bool) error {
+func runTUI(noMotion bool) error {
 	slots, _ := install.Slots() // no slots just means Bear isn't installed
 	saved, libErr := library.List()
 	if libErr != nil {
 		fmt.Fprintln(os.Stderr, warn, libErr)
 	}
-	var faces []fonts.Face
-	c, err := ui.Run(ui.Env{
+	env := ui.Env{
 		Slots:            slots,
 		Backups:          install.Backups(slots),
 		AddedFonts:       install.AddedFonts(),
 		TypographyBackup: typographyBackupExists(),
 		Saved:            saved,
-		LoadFaces: func() []fonts.Face {
-			faces = fonts.Installed(fonts.Dirs(), install.FontsDir())
-			return faces
-		},
-		Version:  version,
-		NoMotion: noMotion,
-	})
+		BearRunning:      install.BearRunning(),
+		ThemesDir:        install.ThemesDir(),
+		Version:          version,
+		NoMotion:         noMotion,
+	}
+	if in, ok := install.LoadInstalled(installedPath()); ok && in.Undone() {
+		env.Reapply = in.Theme
+	}
+	var faces []fonts.Face
+	env.LoadFaces = func() []fonts.Face {
+		faces = fonts.Installed(fonts.Dirs(), install.FontsDir())
+		return faces
+	}
+
+	c, err := ui.Run(env)
 	if err != nil {
 		return err
 	}
-	if c.Restoring() {
-		return restoreTheme(c)
-	}
-
-	installing := c.Installing() && c.Confirm
-
-	// Saved first, so nothing chosen is lost if a later step fails.
-	save := func() error {
-		entry := c.Saved()
-		if !installing {
-			entry.Slot = "" // only remember slots that were really installed
-			if prev, ok := findSaved(saved, entry.Name); ok {
-				entry.Slot = prev.Slot
+	switch {
+	case c.Restoring():
+		return restore(c.RestoreSlot, c.RemoveFonts, c.RestoreTypography)
+	case c.Reapplying():
+		return reapply(c.Restart)
+	case c.Using():
+		for _, s := range saved {
+			if library.Slug(s.Name) == c.UseSel {
+				return useTheme(s, fonts.Installed(fonts.Dirs(), install.FontsDir()), c.Restart)
 			}
 		}
-		path, err := library.Save(entry)
-		if err != nil {
-			return fmt.Errorf("save theme: %w", err)
-		}
-		fmt.Println(ok, "Saved", entry.Name, "to", path)
-		return nil
+		return fmt.Errorf("no saved theme to switch to")
 	}
-	if err := save(); err != nil {
-		return err
+	if faces == nil {
+		faces = fonts.Installed(fonts.Dirs(), install.FontsDir())
 	}
 
-	fontPaths, resolved, err := resolveFonts(c, faces, installing)
-	if err != nil {
-		return err
+	entry := c.Saved()
+	entry.Slot, entry.DarkSlot = c.Slot, c.DarkSlot
+	r := request{
+		Entry:         entry,
+		Install:       c.Installing() && c.Confirm,
+		SetTypography: c.SetTypography,
+		Restart:       c.Restart,
 	}
-	if resolved { // a Google font's PostScript name is now known
-		if err := save(); err != nil {
-			return err
-		}
-	}
-
-	opts := c.Options()
-	data, err := theme.Build(opts).JSON()
-	if err != nil {
-		return err
-	}
-
 	if c.Exporting() {
-		if err := os.WriteFile(c.SavePath, data, 0o644); err != nil {
-			return err
-		}
-		abs, _ := filepath.Abs(c.SavePath)
-		fmt.Println(ok, "Exported", abs)
-		if !installing && c.FontSource() != fonts.SourceInstalled && !haveFont(faces, opts.Font.PostScript) {
-			fmt.Println(warn, opts.Font.Name, "isn't on this Mac yet. Install the theme with bearty to add it to Bear.")
-		}
+		r.Export = c.SavePath
 	}
-
 	if c.Installing() && !c.Confirm {
 		fmt.Println(warn, "Install cancelled; Bear was not changed.")
-		return nil
 	}
-	if !installing {
-		return nil
-	}
-	var typography []install.Pref
-	if c.SetTypography {
-		typography = install.TypographyPrefs(opts)
-	}
-	return installTheme(c.Slot, data, fontPaths, typography)
+	return apply(r, faces)
 }
 
 func typographyBackupExists() bool {
@@ -144,169 +130,38 @@ func typographyBackupExists() bool {
 	return err == nil
 }
 
-func haveFont(faces []fonts.Face, ps string) bool {
-	_, ok := fonts.ByPostScript(faces, ps)
-	return ok
-}
-
-// resolveFonts downloads the theme's text and heading fonts when Bear will
-// need them. For a Google text font it also looks up the PostScript name,
-// which an export needs too. It returns the downloaded files and whether c
-// gained a PostScript name.
-func resolveFonts(c *ui.Choices, faces []fonts.Face, installing bool) (paths []string, resolved bool, err error) {
-	font := c.Font()
-	path, resolved, err := fetchFont(c.FontSource(), font.PostScript, faces, installing, func(ps string) {
-		resolved = c.GooglePS != ps
-		c.GooglePS = ps
-	})
-	if err != nil {
-		return nil, resolved, fmt.Errorf("%w (fix it with Edit a saved theme)", err)
-	}
-	if path != "" {
-		paths = append(paths, path)
-	}
-	if c.HeadingFont != "" && c.HeadingFont != font.PostScript {
-		path, _, err := fetchFont(c.HeadingFontSource(), c.HeadingFont, faces, installing, nil)
-		if err != nil {
-			return nil, resolved, fmt.Errorf("heading font: %w", err)
-		}
-		if path != "" {
-			paths = append(paths, path)
-		}
-	}
-	return paths, resolved, nil
-}
-
-// fetchFont downloads one font if Bear needs it and it isn't on this Mac. A
-// Google font with no known PostScript name is looked up even for an export;
-// learned receives the name.
-func fetchFont(source, ps string, faces []fonts.Face, installing bool, learned func(string)) (path string, resolved bool, err error) {
-	needFile := installing && !haveFont(faces, ps)
-	cache, err := install.CacheDir()
-	if err != nil {
-		return "", false, err
-	}
-	switch family, isGoogle := fonts.GoogleFamily(source); {
-	case isGoogle && (ps == "" || needFile):
-		err = ui.Spin("Fetching "+family+" from Google Fonts…", func() error {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			g, err := fonts.LookupGoogle(ctx, family)
-			if err != nil {
-				return err
-			}
-			if learned != nil {
-				learned(g.PostScript)
-				resolved = true
-			}
-			if installing && !haveFont(faces, g.PostScript) {
-				path, err = fonts.FetchGoogle(ctx, g, cache)
-			}
-			return err
-		})
-	case source == fonts.SourceInkina && needFile:
-		err = ui.Spin("Fetching Inkina…", func() error {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			path, err = install.FetchInkina(ctx)
-			return err
-		})
-	}
-	return path, resolved, err
-}
-
-func findSaved(list []library.Saved, name string) (library.Saved, bool) {
-	for _, s := range list {
-		if library.Slug(s.Name) == library.Slug(name) {
-			return s, true
-		}
-	}
-	return library.Saved{}, false
-}
-
-func restoreTheme(c *ui.Choices) error {
-	if !c.RestoreConfirm {
-		fmt.Println(warn, "Restore cancelled; Bear was not changed.")
-		return nil
-	}
+// restore puts Bear's original theme back in slot and, if asked, removes
+// the fonts bearty added and puts the user's own Bear settings back.
+func restore(slot string, removeFonts, restoreSettings bool) error {
 	fmt.Println("bearty needs your password (sudo) to copy files into Bear.app.")
-	if err := install.Restore(c.RestoreSlot); err != nil {
+	if err := install.Restore(slot); err != nil {
 		return err
 	}
-	fmt.Printf("%s Restored Bear's original %q\n", ok, c.RestoreSlot)
-	if added := install.AddedFonts(); c.RemoveFonts && len(added) > 0 {
+	fmt.Printf("%s Restored Bear's original %q\n", ok, slot)
+	if added := install.AddedFonts(); removeFonts && len(added) > 0 {
 		if err := install.RemoveFonts(added); err != nil {
 			return fmt.Errorf("remove fonts: %w", err)
 		}
 		fmt.Println(ok, "Removed", strings.Join(added, ", "), "from Bear")
 	}
-	if c.RestoreTypography {
+	if restoreSettings {
 		if path, err := library.TypographyBackupPath(); err == nil {
 			if _, err := os.Stat(path); err == nil {
 				if err := install.RestoreTypography(path); err != nil {
-					return fmt.Errorf("restore typography: %w", err)
+					return fmt.Errorf("restore Bear's settings: %w", err)
 				}
-				fmt.Println(ok, "Restored your own Bear typography")
+				fmt.Println(ok, "Restored your own Bear settings (typography and theme choice)")
 			}
 		}
 	}
+	// bearty no longer has anything installed there to re-apply.
+	if in, ok := install.LoadInstalled(installedPath()); ok &&
+		(in.Light.Slot == slot || (in.Dark != nil && in.Dark.Slot == slot)) {
+		os.Remove(installedPath())
+	}
 	fmt.Println()
-	printNextSteps(c.RestoreSlot)
-	return nil
-}
-
-func printNextSteps(slot string) {
 	if install.BearRunning() {
-		fmt.Println("Quit Bear (⌘Q) and reopen it to see", slot, "in Settings → Themes.")
-	} else {
-		fmt.Println("Open Bear to see", slot, "in Settings → Themes.")
+		fmt.Println("Quit Bear (⌘Q) and reopen it to see the change.")
 	}
-}
-
-func installTheme(slot string, data []byte, fontPaths []string, typography []install.Pref) error {
-	backup, created, err := install.Backup(slot)
-	if err != nil {
-		return fmt.Errorf("back up %s: %w", slot, err)
-	}
-	if created {
-		fmt.Println(ok, "Backed up the original to", backup)
-	} else {
-		fmt.Println(ok, "Keeping the existing backup at", backup)
-	}
-
-	fmt.Println("bearty needs your password (sudo) to copy files into Bear.app.")
-	for _, fontPath := range fontPaths {
-		copied, err := install.Font(fontPath)
-		if err != nil {
-			return err
-		}
-		if copied {
-			fmt.Println(ok, "Installed", filepath.Base(fontPath), "into Bear")
-		}
-	}
-	if err := install.Theme(slot, data); err != nil {
-		return err
-	}
-	fmt.Printf("%s Replaced %q\n", ok, slot)
-
-	if len(typography) > 0 {
-		path, err := library.TypographyBackupPath()
-		if err != nil {
-			return err
-		}
-		if created, err := install.BackupTypography(path); err != nil {
-			return fmt.Errorf("back up Bear's typography: %w", err)
-		} else if created {
-			fmt.Println(ok, "Saved your Bear typography to", path)
-		}
-		if err := install.ApplyTypography(typography); err != nil {
-			return err
-		}
-		fmt.Println(ok, "Set Bear's typography to match the theme")
-	}
-	fmt.Println()
-
-	printNextSteps(slot)
-	fmt.Println("A Bear update restores the original; run bearty again afterwards.")
 	return nil
 }

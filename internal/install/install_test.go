@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/manojsachwani/bearty/internal/theme"
@@ -136,7 +137,8 @@ func TestTypographyBackupApplyRestore(t *testing.T) {
 		got[p.Key] = p
 	}
 	if got["SFEditorFont"].Value != "IndieFlower-Regular" || got["SFEditorFontSize"].Value != "24" ||
-		got["SFEditorHeadingsFont"].Value != "PatrickHand-Regular" || got["SFEditorParagraphIndentMultiplier"].Value != "0.2" {
+		got["SFEditorHeadingsFont"].Value != "PatrickHand-Regular" || got["SFEditorParagraphIndentMultiplier"].Value != "0.2" ||
+		got["SFEditorCodeFont"].Value != "RobotoMono-Regular" {
 		t.Errorf("applied: %+v", got)
 	}
 	if created, _ := BackupTypography(backup); created {
@@ -152,5 +154,59 @@ func TestTypographyBackupApplyRestore(t *testing.T) {
 	}
 	if got["SFEditorFont"].Value != "Avenir-Book" || got["SFEditorFontSize"].Value != "17" || !got["SFEditorParagraphIndentMultiplier"].Missing {
 		t.Errorf("restored: %+v", got)
+	}
+}
+
+func TestInstalledUndone(t *testing.T) {
+	fakeBear(t)
+	dir := t.TempDir()
+	data := []byte(`{"bearty":1}`)
+	os.WriteFile(filepath.Join(ThemesDir(), "Notes.theme"), data, 0o644)
+	os.MkdirAll(FontsDir(), 0o755)
+	os.WriteFile(filepath.Join(FontsDir(), "Inkina-Regular.otf"), []byte("f"), 0o644)
+
+	light, err := NewSlotFile("Notes", data, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := Installed{Theme: "Mine", Light: light, Fonts: []string{"Inkina-Regular.otf"}}
+	path := filepath.Join(dir, "installed.json")
+	SaveInstalled(path, in)
+	got, ok := LoadInstalled(path)
+	if !ok || got.Theme != "Mine" || got.Undone() {
+		t.Fatalf("fresh install should not look undone: %+v", got)
+	}
+	// A Bear update puts the original theme back.
+	os.WriteFile(filepath.Join(ThemesDir(), "Notes.theme"), []byte(`{"orig":"Notes"}`), 0o644)
+	if !got.Undone() {
+		t.Error("a replaced theme file should count as undone")
+	}
+	// Or removes the font.
+	os.WriteFile(filepath.Join(ThemesDir(), "Notes.theme"), data, 0o644)
+	os.Remove(filepath.Join(FontsDir(), "Inkina-Regular.otf"))
+	if !got.Undone() {
+		t.Error("a missing font should count as undone")
+	}
+}
+
+func TestBackupAddsNewKeysOnly(t *testing.T) {
+	dir := t.TempDir()
+	old := BearDefaults
+	BearDefaults = filepath.Join(dir, "bear.plist")
+	t.Cleanup(func() { BearDefaults = old })
+
+	backup := filepath.Join(dir, "b.json")
+	// An older backup with only the font.
+	os.WriteFile(backup, []byte(`[{"key":"SFEditorFont","type":"string","value":"Avenir-Book"}]`), 0o644)
+	ApplyTypography([]Pref{{Key: "SFEditorFont", Type: "string", Value: "Changed"}, {Key: "SFAppDarkThemeName", Type: "string", Value: "High Contrast"}})
+	if _, err := BackupTypography(backup); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(backup)
+	if !strings.Contains(string(b), `"Avenir-Book"`) || strings.Contains(string(b), `"Changed"`) {
+		t.Errorf("existing values must be kept:\n%s", b)
+	}
+	if !strings.Contains(string(b), `"High Contrast"`) {
+		t.Errorf("new keys should be added:\n%s", b)
 	}
 }

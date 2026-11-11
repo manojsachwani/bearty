@@ -1,9 +1,13 @@
 package ui
 
 import (
+	"fmt"
+	"os"
+
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/term"
 
 	"github.com/manojsachwani/bearty/internal/theme"
 )
@@ -45,8 +49,19 @@ func (m spinModel) View() tea.View {
 	return tea.NewView(m.spinner.View() + " " + m.title + "\n")
 }
 
-// Spin runs task while showing a spinner and returns its error.
+// Interactive reports whether bearty is talking to a terminal, so it can
+// draw spinners and colours.
+func Interactive() bool {
+	return term.IsTerminal(os.Stdout.Fd()) && term.IsTerminal(os.Stdin.Fd())
+}
+
+// Spin runs task while showing a spinner and returns its error. Without a
+// terminal (a script or CI) it prints the title and runs the task.
 func Spin(title string, task func() error) error {
+	if !Interactive() {
+		fmt.Println(title)
+		return task()
+	}
 	m := spinModel{
 		spinner: spinner.New(
 			spinner.WithSpinner(spinner.Dot),

@@ -25,15 +25,20 @@ type Pref struct {
 	Missing bool   `json:"missing,omitempty"` // not set before bearty changed it
 }
 
-// typographyKeys are the Settings → Typography preferences bearty manages.
+// typographyKeys are the Bear preferences bearty manages: Settings →
+// Typography, plus the theme chosen for light and dark mode.
 var typographyKeys = []struct{ key, typ string }{
 	{"SFEditorFont", "string"},
 	{"SFEditorHeadingsFont", "string"},
+	{"SFEditorCodeFont", "string"},
 	{"SFEditorFontSize", "int"},
 	{"SFEditorLineHeightMultiplier", "float"},
 	{"SFEditorLineWidthMultiplier", "int"},
 	{"SFEditorParagraphSpacingMultiplier", "float"},
 	{"SFEditorParagraphIndentMultiplier", "float"},
+	// Which theme Bear uses in light and dark mode.
+	{"SFAppThemeName", "string"},
+	{"SFAppDarkThemeName", "string"},
 }
 
 func num(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
@@ -48,6 +53,7 @@ func TypographyPrefs(o theme.Options) []Pref {
 	prefs := []Pref{
 		{Key: "SFEditorFont", Type: "string", Value: o.Font.PostScript},
 		{Key: "SFEditorHeadingsFont", Type: "string", Value: o.Font.Heading},
+		{Key: "SFEditorCodeFont", Type: "string", Value: o.CodeResolved().Font},
 		{Key: "SFEditorFontSize", Type: "int", Value: strconv.Itoa(o.Size)},
 		{Key: "SFEditorLineHeightMultiplier", Type: "float", Value: num(lh)},
 	}
@@ -77,13 +83,34 @@ func ReadTypography() []Pref {
 	return prefs
 }
 
-// BackupTypography saves Bear's current typography to path, once: a later
-// install keeps the first backup, so it always holds the user's own settings.
+// BackupTypography saves Bear's current settings to path, once: a later
+// install keeps what was saved first, so the backup always holds the user's
+// own settings. Keys added to bearty since that backup are added to it.
 func BackupTypography(path string) (created bool, err error) {
-	if _, err := os.Stat(path); err == nil {
-		return false, nil
+	current := ReadTypography()
+	prefs := current
+	if b, err := os.ReadFile(path); err == nil {
+		var saved []Pref
+		if err := json.Unmarshal(b, &saved); err != nil {
+			return false, fmt.Errorf("read %s: %w", path, err)
+		}
+		have := map[string]bool{}
+		for _, p := range saved {
+			have[p.Key] = true
+		}
+		missing := false
+		for _, p := range current {
+			if !have[p.Key] {
+				saved = append(saved, p)
+				missing = true
+			}
+		}
+		if !missing {
+			return false, nil
+		}
+		prefs = saved
 	}
-	b, err := json.MarshalIndent(ReadTypography(), "", "  ")
+	b, err := json.MarshalIndent(prefs, "", "  ")
 	if err != nil {
 		return false, err
 	}
@@ -135,4 +162,12 @@ func writePref(p Pref) error {
 		return fmt.Errorf("set Bear's %s: %v: %s", p.Key, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// SelectThemes makes Bear use light in light mode and dark in dark mode.
+func SelectThemes(light, dark string) error {
+	if err := writePref(Pref{Key: "SFAppThemeName", Type: "string", Value: light}); err != nil {
+		return err
+	}
+	return writePref(Pref{Key: "SFAppDarkThemeName", Type: "string", Value: dark})
 }

@@ -20,30 +20,39 @@ type Options struct {
 
 	// Optional; derived from paper and ink when empty.
 	Headings string // HeadingsInk, HeadingsBlack or #RRGGBB
-	Lines    string // #RRGGBB for separators and ruled-line strokes
+	Lines    string // #RRGGBB for note-list separators and table borders
 	Sidebar  SidebarColors
 	NoteList NoteListColors
 	Accents  Accents
 	Type     Typography
+
+	Highlights   Highlights
+	Code         CodeColors
+	Tag          TagColors
+	HeadingScale float64
+
+	// Extra sets any other theme key, by dotted path such as
+	// "editor.toolbar.text color". Applied last, so it wins.
+	Extra map[string]any
 }
 
 // HeadingColor resolves the Headings choice to a colour.
 func (o Options) HeadingColor() string {
 	switch {
 	case o.Headings == HeadingsBlack:
-		return Rule
+		return o.contrastText()
 	case ValidateHex(o.Headings) == nil:
 		return o.Headings
 	}
 	return o.Ink
 }
 
-// LineColor is the soft stroke used for list separators and ruled lines.
+// LineColor is the soft stroke used for note-list separators and table borders.
 func (o Options) LineColor() string {
 	if ValidateHex(o.Lines) == nil {
 		return o.Lines
 	}
-	return Shade(o.Paper, 0.06)
+	return o.depth(o.Paper, 0.06)
 }
 
 type Theme struct {
@@ -52,6 +61,8 @@ type Theme struct {
 	Sidebar     Sidebar     `json:"sidebar"`
 	Placeholder Placeholder `json:"placeholder"`
 	Editor      Editor      `json:"editor"`
+
+	extra map[string]any
 }
 
 type Base struct {
@@ -223,16 +234,19 @@ func Build(o Options) Theme {
 	}
 	// Unset accents keep Bear's reference to the accent colour.
 	accent := func(v string) string { return or(v, "$base.accent color") }
-	pastel := func(c string) Highlight { return Highlight{Mix(c, paper, 0.7), Rule} }
+	hl, code, tag := o.HighlightsResolved(), o.CodeResolved(), o.TagResolved()
+	mark := func(bg string) Highlight { return Highlight{bg, readableOn(bg)} }
+	text := o.contrastText()
 
 	return Theme{
+		extra: o.Extra,
 		Base: Base{
 			TextColor:           ink,
-			TextSecondaryColor:  Mix(Rule, paper, 0.45),
-			TextTertiaryColor:   Mix(Rule, paper, 0.65),
+			TextSecondaryColor:  Mix(text, paper, 0.45),
+			TextTertiaryColor:   Mix(text, paper, 0.65),
 			BackgroundColor:     paper,
-			BackgroundSecondary: Shade(paper, 0.04),
-			BackgroundTertiary:  Shade(paper, 0.10),
+			BackgroundSecondary: o.depth(paper, 0.04),
+			BackgroundTertiary:  o.depth(paper, 0.10),
 			StrokeColor:         lines,
 			AccentColor:         ink,
 			SearchPrimary:       "#FFFA5E",
@@ -300,26 +314,26 @@ func Build(o Options) Theme {
 			Headers: Headers{
 				TextColor:            o.HeadingColor(),
 				Font:                 o.Font.Heading,
-				ModularScale:         1.15,
+				ModularScale:         o.headingScale(),
 				LineHeightMultiplier: 1.3,
 				AddTopBottomPadding:  1,
 				PaddingTop:           0.5,
 				PaddingBottom:        0.3,
 			},
 			Code: Code{
-				TextColor:       Rule,
+				TextColor:       code.Text,
 				BorderColor:     "$base.text tertiary color",
-				BackgroundColor: "$base.background secondary color",
-				Font:            "RobotoMono-Regular",
+				BackgroundColor: or(o.Code.Background, "$base.background secondary color"),
+				Font:            code.Font,
 				Syntax: Syntax{
-					Comment:  "#8A8A8A",
-					Constant: "#2F6F9F",
-					Number:   "#B5562A",
-					String:   "#5E7D3A",
-					Entity:   "#7A4E8C",
-					Keyword:  "#3D4E7A",
-					Function: "#4D7573",
-					Variable: "#8C5A2E",
+					Comment:  code.Comment,
+					Constant: code.Constant,
+					Number:   code.Number,
+					String:   code.String,
+					Entity:   code.Entity,
+					Keyword:  code.Keyword,
+					Function: code.Function,
+					Variable: code.Variable,
 				},
 			},
 			Task: Task{
@@ -328,19 +342,19 @@ func Build(o Options) Theme {
 				CheckColor:      accent(o.Accents.Ticks),
 			},
 			Tag: Tag{
-				BackgroundColor: Mix(ink, paper, 0.88),
-				TextColor:       ink,
+				BackgroundColor: tag.Background,
+				TextColor:       tag.Text,
 				MarkerColor:     "$base.text secondary color",
 			},
 			Highlighter: Highlighter{
-				Default: Highlight{Mix(ink, paper, 0.75), Rule},
-				Red:     pastel("#D9534F"),
-				Blue:    pastel("#3B7DD8"),
-				Green:   pastel("#4E9A52"),
-				Yellow:  pastel("#E5B92E"),
-				Purple:  pastel("#8E5FB5"),
+				Default: mark(hl.Default),
+				Red:     mark(hl.Red),
+				Blue:    mark(hl.Blue),
+				Green:   mark(hl.Green),
+				Yellow:  mark(hl.Yellow),
+				Purple:  mark(hl.Purple),
 			},
-			Separator: Border{Rule},
+			Separator: Border{text},
 			Table: Table{
 				BorderColor:        lines,
 				CellBackground:     "$base.background color",
@@ -354,9 +368,25 @@ func Build(o Options) Theme {
 	}
 }
 
-// JSON renders the theme the way Bear's own files are laid out.
+// JSON renders the theme the way Bear's own files are laid out. Extra keys,
+// when there are any, are merged in last.
 func (t Theme) JSON() ([]byte, error) {
-	b, err := json.MarshalIndent(t, "", "  ")
+	var v any = t
+	if len(t.extra) > 0 {
+		b, err := json.Marshal(t)
+		if err != nil {
+			return nil, err
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			return nil, err
+		}
+		for path, val := range t.extra {
+			SetPath(m, path, val)
+		}
+		v = m
+	}
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return nil, err
 	}

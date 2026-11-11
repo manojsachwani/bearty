@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -166,7 +167,7 @@ func TestBuiltinsSurviveEditor(t *testing.T) {
 	for _, b := range library.Builtins {
 		got := fromSaved(b, nil).Saved()
 		got.Builtin = b.Builtin
-		if got != b {
+		if !reflect.DeepEqual(got, b) {
 			t.Errorf("%s changed in the editor:\n got %+v\nwant %+v", b.Name, got, b)
 		}
 	}
@@ -221,5 +222,77 @@ func TestFormThemeIgnoresTerminalBackground(t *testing.T) {
 	}
 	if light.Focused.UnselectedOption.GetForeground() != uiText {
 		t.Errorf("unselected options should use uiText, got %v", light.Focused.UnselectedOption.GetForeground())
+	}
+}
+
+func TestWeightsRoundTrip(t *testing.T) {
+	faces := []fonts.Face{
+		{Family: "Noteworthy", Style: "Light", PostScript: "Noteworthy-Light"},
+		{Family: "Noteworthy", Style: "Bold", PostScript: "Noteworthy-Bold"},
+	}
+	for name, s := range map[string]library.Saved{
+		"google pick bold": {Name: "A", Paper: "#F9F9F9", Ink: "#CF5624", Size: 17,
+			Font: "Caveat-Bold", FontSource: "google:Caveat@700"},
+		"mac pick bold": {Name: "B", Paper: "#F9F9F9", Ink: "#CF5624", Size: 17, Font: "Noteworthy-Bold"},
+		"google heading light": {Name: "C", Paper: "#F9F9F9", Ink: "#CF5624", Size: 17,
+			Font: "Inkina-Regular", FontSource: "inkina",
+			HeadingFont: "Kalam-Light", HeadingFontSource: "google:Kalam@300"},
+	} {
+		c := fromSaved(s, faces)
+		c.faces = faces
+		got := c.Saved()
+		if got.Font != s.Font || got.FontSource != s.FontSource ||
+			got.HeadingFont != s.HeadingFont || got.HeadingFontSource != s.HeadingFontSource {
+			t.Errorf("%s: got %q %q / %q %q", name, got.Font, got.FontSource, got.HeadingFont, got.HeadingFontSource)
+		}
+		if c.FontSrc != FontPicks {
+			t.Errorf("%s should reopen as a handwriting pick, got %s", name, c.FontSrc)
+		}
+	}
+}
+
+// Changing the weight must not reuse the PostScript name of the old one.
+func TestChangedGoogleWeightNeedsLookup(t *testing.T) {
+	c := fromSaved(library.Saved{Name: "A", Paper: "#F9F9F9", Ink: "#CF5624", Size: 17,
+		Font: "Caveat-Bold", FontSource: "google:Caveat@700"}, nil)
+	c.PickStyle = "500"
+	if got := c.Saved(); got.Font != "" || got.FontSource != "google:Caveat@500" {
+		t.Errorf("new weight: font %q source %q", got.Font, got.FontSource)
+	}
+	c.PickStyle = "400"
+	if got := c.Saved(); got.Font != "Caveat-Regular" || got.FontSource != "google:Caveat" {
+		t.Errorf("regular: font %q source %q", got.Font, got.FontSource)
+	}
+}
+
+func TestDarkDetailsExtraSurviveEditor(t *testing.T) {
+	s := library.Saved{Name: "Full", Paper: "#F9F9F9", Ink: "#CF5624", Size: 17, Font: "Inkina-Regular", FontSource: "inkina", Headings: theme.HeadingsInk,
+		Dark:         theme.Dark{Mode: theme.DarkCustom, Paper: "#101820", Ink: "#F2C14E"},
+		DarkSlot:     "Dark Notes",
+		Highlights:   theme.Highlights{Yellow: "#FFE066"},
+		Code:         theme.CodeColors{Font: "Menlo-Regular", Keyword: "#AA00AA"},
+		Tag:          theme.TagColors{Text: "#3D4F74"},
+		HeadingScale: 1.3,
+		Extra:        map[string]any{"editor.toolbar.text color": "#123456"},
+	}
+	got := fromSaved(s, nil).Saved()
+	got.CodeSource = ""
+	if !reflect.DeepEqual(got, s) {
+		t.Errorf("changed in the editor:\n got %+v\nwant %+v", got, s)
+	}
+	// Turning the colours back to automatic keeps the chosen code font.
+	c := fromSaved(s, nil)
+	c.DetailsMode = RegionsAuto
+	if g := c.Saved(); !g.Highlights.IsZero() || g.Code.Font != "Menlo-Regular" || g.Code.Keyword != "" {
+		t.Errorf("automatic details: %+v", g.Code)
+	}
+}
+
+func TestCaptureFromStartScreen(t *testing.T) {
+	c := defaults()
+	c.Mode, c.ImportPath = ModeImport, "../library/testdata/paper-pro.theme"
+	s, err := c.Captured("")
+	if err != nil || s.Name != "paper-pro" || s.Paper != "#F7F7F5" || s.Headings != theme.HeadingsBlack {
+		t.Errorf("import: %+v %v", s, err)
 	}
 }

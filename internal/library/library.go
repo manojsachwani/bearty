@@ -37,7 +37,21 @@ type Saved struct {
 	Accents  theme.Accents        `json:"accents,omitzero"`
 	Type     theme.Typography     `json:"typography,omitzero"`
 
-	Slot string `json:"slot,omitempty"` // Bear theme it was last installed over
+	Highlights   theme.Highlights `json:"highlights,omitzero"`
+	Code         theme.CodeColors `json:"code,omitzero"`
+	CodeSource   string           `json:"code_font_source,omitempty"` // download source for Code.Font
+	Tag          theme.TagColors  `json:"tag,omitzero"`
+	HeadingScale float64          `json:"heading_scale,omitempty"`
+
+	Dark theme.Dark `json:"dark,omitzero"`
+
+	// Extra holds any other Bear theme key by dotted path, e.g.
+	// "editor.toolbar.text color". Captured themes use it for whatever
+	// bearty doesn't model, so they rebuild exactly.
+	Extra map[string]any `json:"extra,omitempty"`
+
+	Slot     string `json:"slot,omitempty"`      // Bear theme it was last installed over
+	DarkSlot string `json:"dark_slot,omitempty"` // and its dark version
 
 	Builtin bool `json:"-"`
 }
@@ -105,6 +119,7 @@ func (s Saved) Options() theme.Options {
 		Name: s.Name, Paper: s.Paper, Ink: s.Ink, Font: f, Size: s.Size,
 		Headings: s.Headings, Lines: s.Lines,
 		Sidebar: s.Sidebar, NoteList: s.NoteList, Accents: s.Accents, Type: s.Type,
+		Highlights: s.Highlights, Code: s.Code, Tag: s.Tag, HeadingScale: s.HeadingScale, Extra: s.Extra,
 	}
 }
 
@@ -122,6 +137,15 @@ func Dir() (string, error) {
 }
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
+
+// ConfigDir is bearty's settings folder, ~/.config/bearty.
+func ConfigDir() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(dir), nil
+}
 
 // TypographyBackupPath holds the user's own Bear typography from before
 // bearty first changed it.

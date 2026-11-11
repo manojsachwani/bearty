@@ -13,9 +13,28 @@ const (
 // GoogleSource is the source string for a Google Fonts family.
 func GoogleSource(family string) string { return googlePrefix + family }
 
-// GoogleFamily returns the family of a Google source.
+// GoogleFamily returns the family of a Google source, without its style.
 func GoogleFamily(source string) (string, bool) {
-	return strings.CutPrefix(source, googlePrefix)
+	rest, ok := strings.CutPrefix(source, googlePrefix)
+	family, _, _ := strings.Cut(rest, "@")
+	return family, ok
+}
+
+// GoogleStyleOf returns the style of a Google source, such as "700" or
+// "400i"; sources saved before styles existed mean Regular.
+func GoogleStyleOf(source string) string {
+	if _, style, ok := strings.Cut(source, "@"); ok && style != "" {
+		return style
+	}
+	return RegularStyle
+}
+
+// GoogleSourceStyle is the source for one style of a Google family.
+func GoogleSourceStyle(family, style string) string {
+	if style == "" || style == RegularStyle {
+		return GoogleSource(family)
+	}
+	return GoogleSource(family) + "@" + style
 }
 
 // InkinaPostScript is the PostScript name inside Inkina-Regular.otf.
@@ -69,6 +88,32 @@ var GoogleSuggestions = []string{
 // PickByPostScript finds a recommended font.
 func PickByPostScript(ps string) (Pick, bool) {
 	for _, p := range Picks {
+		if p.PostScript == ps {
+			return p, true
+		}
+	}
+	return Pick{}, false
+}
+
+// CodePicks are the monospace fonts offered for code blocks. Google fonts
+// whose METADATA names only a light default instance are left out, since
+// Bear would draw code too thin.
+var CodePicks = []Pick{
+	{Name: "Roboto Mono (Bear's default)", PostScript: "RobotoMono-Regular"},
+	{Name: "Menlo", PostScript: "Menlo-Regular"},
+	{Name: "Monaco", PostScript: "Monaco"},
+	{Name: "Courier New", PostScript: "CourierNewPSMT"},
+	{Name: "Andale Mono", PostScript: "AndaleMono"},
+	{Name: "PT Mono", PostScript: "PTMono-Regular"},
+	{Name: "JetBrains Mono", PostScript: "JetBrainsMono-Regular", Source: GoogleSource("JetBrains Mono")},
+	{Name: "IBM Plex Mono", PostScript: "IBMPlexMono-Regular", Source: GoogleSource("IBM Plex Mono")},
+	{Name: "Space Mono", PostScript: "SpaceMono-Regular", Source: GoogleSource("Space Mono")},
+	{Name: "Inconsolata", PostScript: "Inconsolata-Regular", Source: GoogleSource("Inconsolata")},
+}
+
+// CodePickByPostScript finds a code font pick.
+func CodePickByPostScript(ps string) (Pick, bool) {
+	for _, p := range CodePicks {
 		if p.PostScript == ps {
 			return p, true
 		}

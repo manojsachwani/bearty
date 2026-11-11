@@ -53,7 +53,7 @@ func TestPicksResolveOnGoogle(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	for _, p := range Picks {
+	for _, p := range append(append([]Pick{}, Picks...), CodePicks...) {
 		family, ok := GoogleFamily(p.Source)
 		if !ok {
 			continue
@@ -87,5 +87,45 @@ func TestFetchGoogleFile(t *testing.T) {
 	faces := readFaces(path)
 	if len(faces) != 1 || faces[0].PostScript != g.PostScript {
 		t.Errorf("downloaded file has %+v, want %s", faces, g.PostScript)
+	}
+}
+
+func TestStyleParsing(t *testing.T) {
+	if w, i := ParseStyle("700i"); w != 700 || !i {
+		t.Errorf("700i = %d %v", w, i)
+	}
+	if got := StyleLabel("300i"); got != "Light Italic" {
+		t.Errorf("label = %s", got)
+	}
+	if got := GoogleStyleOf("google:Caveat"); got != RegularStyle {
+		t.Errorf("old sources mean Regular, got %s", got)
+	}
+	if fam, _ := GoogleFamily("google:Caveat@700"); fam != "Caveat" {
+		t.Errorf("family = %s", fam)
+	}
+}
+
+// Set BEARTY_NETWORK_TESTS=1: weights of a variable and a static family, and
+// a bold download whose name is read from the file.
+func TestGoogleStylesAndFetch(t *testing.T) {
+	if os.Getenv("BEARTY_NETWORK_TESTS") == "" {
+		t.Skip("BEARTY_NETWORK_TESTS not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	caveat, err := GoogleStyles(ctx, "Caveat") // variable 400–700
+	if err != nil || len(caveat) != 4 || caveat[0] != "400" || caveat[3] != "700" {
+		t.Errorf("Caveat styles = %v, %v", caveat, err)
+	}
+	kalam, _ := GoogleStyles(ctx, "Kalam") // static 300, 400, 700
+	if len(kalam) != 3 || kalam[0] != "300" {
+		t.Errorf("Kalam styles = %v", kalam)
+	}
+	path, ps, err := FetchGoogleStyle(ctx, "Caveat", "700", t.TempDir())
+	if err != nil || ps != "Caveat-Bold" {
+		t.Errorf("Caveat Bold: %s %q %v", path, ps, err)
+	}
+	if _, _, err := FetchGoogleStyle(ctx, "Caveat", "900", t.TempDir()); err == nil {
+		t.Error("a weight the family lacks should fail")
 	}
 }

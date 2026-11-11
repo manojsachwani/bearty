@@ -138,3 +138,13 @@ func TestAccents(t *testing.T) {
 		t.Errorf("unset markers should follow the ink, got %s", th.Editor.ListMarkerColor)
 	}
 }
+
+func TestBadColoursDontPanic(t *testing.T) {
+	for _, bad := range []string{"", "#", "red", "#12"} {
+		o := Options{Paper: bad, Ink: bad, Size: 17}
+		if _, err := Build(o).JSON(); err != nil {
+			t.Errorf("%q: %v", bad, err)
+		}
+		_ = o.DarkVariant(Dark{Mode: DarkAuto})
+	}
+}

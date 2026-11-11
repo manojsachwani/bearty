@@ -32,24 +32,24 @@ func or(v, def string) string {
 
 // SidebarResolved fills in every sidebar colour.
 func (o Options) SidebarResolved() SidebarColors {
-	bg := or(o.Sidebar.Background, Shade(o.Paper, 0.06))
+	bg := or(o.Sidebar.Background, o.depth(o.Paper, 0.06))
 	return SidebarColors{
 		Background: bg,
-		Text:       or(o.Sidebar.Text, "#333333"),
+		Text:       or(o.Sidebar.Text, o.sidebarText()),
 		Icons:      or(o.Sidebar.Icons, o.Ink),
 		// A step darker than whatever the sidebar is, so a custom background keeps a visible selection.
-		Selected: or(o.Sidebar.Selected, Shade(bg, 0.085)),
+		Selected: or(o.Sidebar.Selected, o.depth(bg, 0.085)),
 	}
 }
 
 // NoteListResolved fills in every note list colour.
 func (o Options) NoteListResolved() NoteListColors {
-	secondary := Mix(Rule, o.Paper, 0.45)
+	secondary := Mix(o.contrastText(), o.Paper, 0.45)
 	return NoteListColors{
 		Title:    or(o.NoteList.Title, o.HeadingColor()),
 		Preview:  or(o.NoteList.Preview, secondary),
 		Date:     or(o.NoteList.Date, secondary),
-		Selected: or(o.NoteList.Selected, Shade(o.Paper, 0.07)),
+		Selected: or(o.NoteList.Selected, o.depth(o.Paper, 0.07)),
 	}
 }
 
@@ -87,3 +87,10 @@ func (t Typography) IsZero() bool { return t == Typography{} }
 
 // DefaultLineHeight is used when Typography.LineHeight is zero.
 const DefaultLineHeight = 1.6
+
+func (o Options) sidebarText() string {
+	if IsDark(o.Paper) {
+		return "#D6D6D6"
+	}
+	return "#333333"
+}
