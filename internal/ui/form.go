@@ -318,7 +318,7 @@ func swatchOptions(presets []theme.Swatch) []huh.Option[string] {
 	for _, s := range presets {
 		opts = append(opts, huh.NewOption(swatch(s.Hex)+" "+s.Name, s.Hex))
 	}
-	return append(opts, huh.NewOption("   Custom hex…", custom))
+	return append(opts, huh.NewOption("   Custom color…", custom))
 }
 
 // colourInput edits one optional colour. While empty it shows, and uses,
@@ -460,8 +460,8 @@ func newStartForm(c *Choices, env Env) *huh.Form {
 				Options(modes...).Height(len(modes)+2).Value(&c.Mode),
 		),
 		huh.NewGroup(
-			huh.NewSelect[string]().Key("saved").Title("Which theme?").
-				Description("Saved in ~/.config/bearty/themes. Every setting can be changed next.").
+			huh.NewSelect[string]().Key("saved").Title("Which saved theme?").
+				Description("From ~/.config/bearty/themes. You can change any setting next.").
 				Options(saved...).Height(min(len(saved), 8)+4).Value(&c.SavedSel),
 		).WithHideFunc(func() bool { return c.Mode != ModeEdit }),
 
@@ -515,10 +515,10 @@ func newEditForm(c *Choices, env Env) *huh.Form {
 		c.Output = OutputExport
 	}
 	outputs = append(outputs,
-		huh.NewOption("Export a .theme file", OutputExport),
+		huh.NewOption("Export a .theme file only", OutputExport),
 		huh.NewOption("Just save it to my themes", OutputNone),
 	)
-	outputDesc := "It's always saved to your themes so you can edit it later."
+	outputDesc := "Every theme is also saved to your themes, so you can edit it later."
 	if len(env.Slots) == 0 {
 		outputDesc = "Bear.app wasn't found, so installing isn't available."
 	}
@@ -532,7 +532,7 @@ func newEditForm(c *Choices, env Env) *huh.Form {
 
 	return styled(huh.NewForm(
 		huh.NewGroup(
-			huh.NewInput().Key("name").Title("Name").Value(&c.Name).Validate(func(s string) error {
+			huh.NewInput().Key("name").Title("Theme name").Value(&c.Name).Validate(func(s string) error {
 				slug := library.Slug(s)
 				switch {
 				case strings.TrimSpace(s) == "":
@@ -545,22 +545,22 @@ func newEditForm(c *Choices, env Env) *huh.Form {
 			huh.NewSelect[string]().Key("paper").Title("Paper").
 				Options(swatchOptions(theme.Papers)...).Height(len(theme.Papers)+3).Value(&c.PaperSel),
 		),
-		huh.NewGroup(newPicker("paperhex", "Paper colour", &c.PaperHex, func() string { return theme.Papers[0].Hex })).
+		huh.NewGroup(newPicker("paperhex", "Paper color", &c.PaperHex, func() string { return theme.Papers[0].Hex })).
 			WithHideFunc(func() bool { return c.PaperSel != custom }),
 
 		huh.NewGroup(
 			huh.NewSelect[string]().Key("ink").Title("Ink").
-				Description("The text colour. Links, list markers and ticks follow it unless you change them next.").
+				Description("Main text color. Links, list markers and ticks use it too, unless you pick them next.").
 				Options(swatchOptions(theme.Inks)...).Height(len(theme.Inks)+4).Value(&c.InkSel),
 		),
-		huh.NewGroup(newPicker("inkhex", "Ink colour", &c.InkHex, func() string { return theme.Inks[0].Hex })).
+		huh.NewGroup(newPicker("inkhex", "Ink color", &c.InkHex, func() string { return theme.Inks[0].Hex })).
 			WithHideFunc(func() bool { return c.InkSel != custom }),
 
 		huh.NewGroup(
-			huh.NewSelect[string]().Key("accentmode").Title("Links, list markers and ticks").
+			huh.NewSelect[string]().Key("accentmode").Title("Links, list markers and to-do ticks").
 				Options(
 					huh.NewOption("Same as the text", RegionsAuto),
-					huh.NewOption("Choose each colour", RegionsCustom),
+					huh.NewOption("Pick each color", RegionsCustom),
 				).Height(4).Value(&c.AccentMode),
 		),
 		huh.NewGroup(
@@ -575,31 +575,31 @@ func newEditForm(c *Choices, env Env) *huh.Form {
 		huh.NewGroup(
 			huh.NewSelect[string]().Key("headings").Title("Headings").
 				Options(
-					huh.NewOption("   Same as the ink", theme.HeadingsInk),
+					huh.NewOption("   Same as the text", theme.HeadingsInk),
 					huh.NewOption(swatch(theme.Rule)+" Black", theme.HeadingsBlack),
-					huh.NewOption("   Custom hex…", custom),
+					huh.NewOption("   Custom color…", custom),
 				).Height(5).Value(&c.Headings),
 		),
-		huh.NewGroup(newPicker("headinghex", "Heading colour", &c.HeadingsHex, func() string { return theme.Rule })).
+		huh.NewGroup(newPicker("headinghex", "Heading color", &c.HeadingsHex, func() string { return theme.Rule })).
 			WithHideFunc(func() bool { return c.Headings != custom }),
 
 		huh.NewGroup(
 			huh.NewSelect[string]().Key("fontsrc").Title("Typeface").
-				Description("For notes and headings. Bear always draws the sidebar and note list in the system font.").
+				Description("Used for note text. Bear always uses the system font in the sidebar and note list.").
 				Options(
-					huh.NewOption("Handwriting picks", FontPicks),
+					huh.NewOption("Handwriting fonts", FontPicks),
 					huh.NewOption(fmt.Sprintf("Any font on this Mac (%d families)", len(families)), FontInstalled),
-					huh.NewOption("Any Google font (downloads)", FontGoogle),
+					huh.NewOption("Any Google Font (downloaded on install)", FontGoogle),
 				).Height(7).Value(&c.FontSrc),
 		),
 		huh.NewGroup(
 			huh.NewSelect[string]().Key("pick").Title("Handwriting").
-				Description("↓ fonts download when you install.").
+				Description("Fonts marked ↓ are downloaded when you install.").
 				Options(picks...).Height(min(len(picks), 12)+3).Value(&c.FontPick),
 		).WithHideFunc(func() bool { return c.FontSrc != FontPicks }),
 		huh.NewGroup(
 			huh.NewInput().Key("fontquery").Title("Search fonts").
-				Placeholder("e.g. avenir, or leave empty for all").Value(&c.FontQuery),
+				Placeholder("Type to filter, e.g. Avenir").Value(&c.FontQuery),
 			huh.NewSelect[string]().Key("family").Title("Font family").
 				DescriptionFunc(func() string {
 					n := len(familyOptions(c, families))
@@ -622,7 +622,7 @@ func newEditForm(c *Choices, env Env) *huh.Form {
 		).WithHideFunc(func() bool { return c.FontSrc != FontInstalled }),
 		huh.NewGroup(
 			huh.NewInput().Key("google").Title("Google Fonts family").
-				Description("Any family on fonts.google.com. ctrl+e completes a suggestion.").
+				Description("Any family from fonts.google.com. Press ctrl+e to accept a suggestion.").
 				Placeholder("Caveat").Suggestions(fonts.GoogleSuggestions).Value(&c.GoogleName).
 				Validate(func(s string) error {
 					if fonts.GoogleSlug(s) == "" {
@@ -652,15 +652,15 @@ func newEditForm(c *Choices, env Env) *huh.Form {
 				Inline(true).Value(&c.Type.LineWidth),
 			colourInput(c, "lines", "Rule lines", &c.Lines,
 				func(o theme.Options) string { return o.LineColor() }).(*picker).
-				Description(func() string { return "Separators and table borders." }),
+				Description(func() string { return "Used for note-list separators and table borders." }),
 		),
 
 		huh.NewGroup(
-			huh.NewSelect[string]().Key("regions").Title("Sidebar and note list colours").
-				Description("Automatic colours follow your paper and ink.").
+			huh.NewSelect[string]().Key("regions").Title("Sidebar and note list colors").
+				Description("Automatic colors are worked out from your paper and ink.").
 				Options(
 					huh.NewOption("Automatic", RegionsAuto),
-					huh.NewOption("Choose each colour", RegionsCustom),
+					huh.NewOption("Pick each color", RegionsCustom),
 				).Height(5).Value(&c.Regions),
 		),
 		huh.NewGroup(
@@ -685,29 +685,29 @@ func newEditForm(c *Choices, env Env) *huh.Form {
 		).Title("Note list").WithHideFunc(func() bool { return c.Regions != RegionsCustom }),
 
 		huh.NewGroup(
-			huh.NewSelect[string]().Key("output").Title("What next?").Description(outputDesc).
+			huh.NewSelect[string]().Key("output").Title("What should bearty do with it?").Description(outputDesc).
 				Options(outputs...).Height(len(outputs)+4).Value(&c.Output),
 		),
 		huh.NewGroup(
-			huh.NewInput().Key("path").Title("Export to").Value(&c.SavePath).
+			huh.NewInput().Key("path").Title("Export file").Value(&c.SavePath).
 				PlaceholderFunc(c.DefaultSavePath, &c.Name),
 		).WithHideFunc(func() bool { return !c.Exporting() }),
 
 		huh.NewGroup(
 			huh.NewSelect[string]().Key("slot").Title("Which Bear theme should it replace?").
-				Description("You'll pick this name in Bear → Settings → Themes.").
+				Description("Bear can't add new themes, so bearty replaces one. Afterwards, choose this name in Bear → Settings → Themes.").
 				Options(huh.NewOptions(env.Slots...)...).Height(14).Value(&c.Slot),
 			huh.NewConfirm().Key("confirm").
 				TitleFunc(func() string { return fmt.Sprintf("Replace %q?", c.Slot) }, &c.Slot).
 				DescriptionFunc(func() string {
 					return fmt.Sprintf("The original is backed up to ~/Downloads/%s.original.theme. You'll be asked for your password.", c.Slot)
 				}, &c.Slot).
-				Affirmative("Replace").Negative("Cancel install").Value(&c.Confirm),
+				Affirmative("Replace").Negative("Don't install").Value(&c.Confirm),
 		).WithHideFunc(func() bool { return !c.Installing() }),
 		huh.NewGroup(
 			huh.NewConfirm().Key("typography").Title("Also set Bear's typography to match?").
-				Description("Bear's Settings → Typography overrides a theme's font, size and spacing, so the theme's font only shows once these match. Your current settings are saved, and Restore puts them back.").
-				Affirmative("Set it").Negative("Leave it").Value(&c.SetTypography),
+				Description("Bear's own Typography settings override a theme's font and size. Your current settings are saved first, and Restore puts them back.").
+				Affirmative("Yes, set it").Negative("No").Value(&c.SetTypography),
 		).WithHideFunc(func() bool { return !c.Installing() || !c.Confirm }),
 	))
 }

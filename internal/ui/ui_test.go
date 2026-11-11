@@ -202,3 +202,24 @@ func TestQuitKey(t *testing.T) {
 		t.Error("q in a text field should type, not quit")
 	}
 }
+
+// Regression: options were near-black (colour 235) when the terminal didn't
+// report a dark background. The theme must not depend on that guess.
+func TestFormThemeIgnoresTerminalBackground(t *testing.T) {
+	light, dark := formTheme(false), formTheme(true)
+	for name, pair := range map[string][2]lipgloss.Style{
+		"option":            {light.Focused.UnselectedOption, dark.Focused.UnselectedOption},
+		"selected":          {light.Focused.SelectedOption, dark.Focused.SelectedOption},
+		"description":       {light.Focused.Description, dark.Focused.Description},
+		"blurred option":    {light.Blurred.UnselectedOption, dark.Blurred.UnselectedOption},
+		"help key":          {light.Help.ShortKey, dark.Help.ShortKey},
+		"input placeholder": {light.Focused.TextInput.Placeholder, dark.Focused.TextInput.Placeholder},
+	} {
+		if pair[0].GetForeground() != pair[1].GetForeground() {
+			t.Errorf("%s differs between light and dark terminals", name)
+		}
+	}
+	if light.Focused.UnselectedOption.GetForeground() != uiText {
+		t.Errorf("unselected options should use uiText, got %v", light.Focused.UnselectedOption.GetForeground())
+	}
+}

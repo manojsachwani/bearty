@@ -11,3 +11,6 @@ dist/
 
 # Local dogfood installer
 dev-install.sh
+
+# Local agent settings (Claude Code); kept visible to agents' search via .ignore
+.claude/

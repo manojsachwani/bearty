@@ -17,7 +17,7 @@ const (
 
 const sampleTitle = "Make Bear yours"
 
-const sampleBody = "Pick a paper, an ink and a typeface, then fine-tune any colour you like."
+const sampleBody = "Pick a paper, an ink and a typeface, then fine-tune any color you like."
 
 func wrap(s string, width int) []string {
 	var lines []string
@@ -109,7 +109,7 @@ func renderPreview(c *Choices, o theme.Options) string {
 
 	page := lipgloss.JoinVertical(lipgloss.Left, rows...)
 	title := lipgloss.NewStyle().Foreground(ember).Bold(true).Render(strings.ToUpper(c.Name))
-	note := lipgloss.NewStyle().Foreground(faintFg).Render("Preview")
+	note := lipgloss.NewStyle().Foreground(faintFg).Render("Note")
 	return lipgloss.JoinVertical(lipgloss.Left, title, "", page, note, "", renderWindow(o))
 }
 

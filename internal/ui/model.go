@@ -26,7 +26,7 @@ const (
 	stageEdit
 )
 
-var steps = []string{"Start", "Paper", "Ink", "Type", "Style", "Colours", "Output", "Install"}
+var steps = []string{"Start", "Paper", "Ink", "Type", "Layout", "Colors", "Save", "Install"}
 
 // stepOf maps a focused field's key to its breadcrumb step.
 var stepOf = map[string]string{
@@ -35,12 +35,12 @@ var stepOf = map[string]string{
 	"ink": "Ink", "inkhex": "Ink", "accentmode": "Ink", "acc-links": "Ink", "acc-markers": "Ink",
 	"acc-ticks": "Ink", "headings": "Ink", "headinghex": "Ink",
 	"fontsrc": "Type", "pick": "Type", "fontquery": "Type", "family": "Type", "headingfont": "Type", "face": "Type", "google": "Type",
-	"size": "Style", "lines": "Style", "lineheight": "Style", "pspacing": "Style",
-	"pindent": "Style", "linewidth": "Style",
-	"regions": "Colours", "side-bg": "Colours", "side-text": "Colours", "side-icons": "Colours",
-	"side-sel": "Colours", "list-title": "Colours", "list-preview": "Colours", "list-date": "Colours",
-	"list-sel": "Colours",
-	"output":   "Output", "path": "Output",
+	"size": "Layout", "lines": "Layout", "lineheight": "Layout", "pspacing": "Layout",
+	"pindent": "Layout", "linewidth": "Layout",
+	"regions": "Colors", "side-bg": "Colors", "side-text": "Colors", "side-icons": "Colors",
+	"side-sel": "Colors", "list-title": "Colors", "list-preview": "Colors", "list-date": "Colors",
+	"list-sel": "Colors",
+	"output":   "Output", "path": "Save",
 	"slot": "Install", "confirm": "Install", "typography": "Install",
 }
 
@@ -340,18 +340,18 @@ func (m model) version() string {
 
 func (m model) aboutView() string {
 	h := lipgloss.NewStyle().Foreground(ember).Bold(true)
-	t := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	t := lipgloss.NewStyle().Foreground(uiText)
 	d := lipgloss.NewStyle().Foreground(dim)
 	rows := []string{
 		badge() + d.Render("  "+m.version()),
 		"",
 		t.Render("Custom themes for the Bear notes app on macOS."),
-		t.Render("Pick colours and a typeface, watch the preview,"),
+		t.Render("Pick colors and a typeface, watch the preview,"),
 		t.Render("then install the theme into Bear or export it."),
 		"",
 		h.Render("Made by"),
 		t.Render("@manojsachwani · github.com/manojsachwani/bearty"),
-		d.Render("MIT licence"),
+		d.Render("MIT license"),
 		"",
 		h.Render("Thanks to"),
 		t.Render("Charm for Bubble Tea, Huh, Lip Gloss, Bubbles, Harmonica"),
@@ -359,19 +359,19 @@ func (m model) aboutView() string {
 		t.Render("Piyush-linux/Bear-Notes-Theme for the install approach"),
 		"",
 		h.Render("How-to"),
-		t.Render("Font or size not changing? Bear's Settings → Typography"),
-		t.Render("overrides themes. Say yes to \"Also set Bear's typography\""),
-		t.Render("when installing, or pick the font there yourself."),
+		t.Render("Font or size not changing? Bear's own Typography"),
+		t.Render("settings override themes. Say yes to setting them when"),
+		t.Render("you install, or pick the font in Bear → Settings."),
 		t.Render("After installing, quit Bear (⌘Q), reopen it, and choose"),
 		t.Render("the replaced theme in Settings → Themes."),
-		t.Render("Bear can't draw ruled or grid pages, and the sidebar and"),
-		t.Render("note list always use the system font."),
+		t.Render("Bear can't draw ruled or grid pages, and it always uses"),
+		t.Render("the system font in the sidebar and note list."),
 		"",
 		h.Render("Keys"),
 		t.Render("↑/↓ move · enter next · ←/→ switch inline choices"),
 		t.Render("shift+tab or esc back · q or ctrl+c quit"),
 		"",
-		d.Render("Press any key to go back."),
+		d.Render("Press any key to close."),
 	}
 	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(pumpkin).
 		Padding(1, 3).Render(strings.Join(rows, "\n"))
@@ -382,7 +382,7 @@ func (m model) View() tea.View {
 		return tea.NewView("")
 	}
 	if m.splash != nil {
-		v := tea.NewView(m.splash.view(m.version(), m.size.Width, m.size.Height))
+		v := paint(tea.NewView(m.splash.view(m.version(), m.size.Width, m.size.Height)))
 		v.AltScreen = true
 		return v
 	}
@@ -405,7 +405,7 @@ func (m model) View() tea.View {
 		}
 		content = lipgloss.JoinVertical(lipgloss.Left, m.header(), "", body, "", m.help.View(globalKeys))
 	}
-	v := tea.NewView(lipgloss.NewStyle().Padding(1, 3).Render(content))
+	v := paint(tea.NewView(lipgloss.NewStyle().Padding(1, 3).Render(content)))
 	v.AltScreen = true
 	return v
 }
@@ -420,7 +420,7 @@ func Run(env Env) (*Choices, error) {
 		form:    newStartForm(c, env),
 		choices: c,
 		env:     env,
-		help:    help.New(),
+		help:    newHelp(),
 		motion:  &motion{off: env.NoMotion},
 	}
 	if !env.NoMotion {
@@ -439,4 +439,10 @@ func Run(env Env) (*Choices, error) {
 		c.SavePath = c.DefaultSavePath()
 	}
 	return c, nil
+}
+
+func newHelp() help.Model {
+	h := help.New()
+	h.Styles = helpStyles()
+	return h
 }

@@ -229,7 +229,7 @@ func restoreTheme(c *ui.Choices) error {
 		fmt.Println(warn, "Restore cancelled; Bear was not changed.")
 		return nil
 	}
-	fmt.Println("Copying into Bear.app needs your password (sudo).")
+	fmt.Println("bearty needs your password (sudo) to copy files into Bear.app.")
 	if err := install.Restore(c.RestoreSlot); err != nil {
 		return err
 	}
@@ -274,7 +274,7 @@ func installTheme(slot string, data []byte, fontPaths []string, typography []ins
 		fmt.Println(ok, "Keeping the existing backup at", backup)
 	}
 
-	fmt.Println("Copying into Bear.app needs your password (sudo).")
+	fmt.Println("bearty needs your password (sudo) to copy files into Bear.app.")
 	for _, fontPath := range fontPaths {
 		copied, err := install.Font(fontPath)
 		if err != nil {
